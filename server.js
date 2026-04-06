@@ -20,8 +20,10 @@ function formatDate(dateString) {
 // 获取最新论文
 app.get('/api/latest', async (req, res) => {
   try {
-    const { category = 'biorxiv', page = 0, perPage = 20 } = req.query;
-    const url = `${BIORXIV_API}/details/${category}/${page}/${perPage}`;
+    const { cursor = 0, perPage = 20 } = req.query;
+    const c = parseInt(cursor) || 0;
+    // 使用"最近N篇"格式：/details/biorxiv/{count}
+    const url = `${BIORXIV_API}/details/biorxiv/${parseInt(perPage)}`;
     
     const response = await fetch(url, {
       headers: {
@@ -47,11 +49,11 @@ app.get('/api/latest', async (req, res) => {
       res.json({
         success: true,
         data: papers,
-        total: data.total,
-        page: parseInt(page)
+        total: data.collection.length,
+        cursor: c + parseInt(perPage)
       });
     } else {
-      res.json({ success: true, data: [], total: 0, page: parseInt(page) });
+      res.json({ success: true, data: [], total: 0, cursor: c + parseInt(perPage) });
     }
   } catch (error) {
     console.error('Error fetching latest:', error);
