@@ -20,7 +20,7 @@ function formatDate(dateString) {
 // 获取最新论文
 app.get('/api/latest', async (req, res) => {
   try {
-    const { cursor = 0, perPage = 20 } = req.query;
+    const { cursor = 0, perPage = 50 } = req.query;
     const c = parseInt(cursor) || 0;
     // 使用"最近N篇"格式：/details/biorxiv/{count}
     const url = `${BIORXIV_API}/details/biorxiv/${parseInt(perPage)}`;
