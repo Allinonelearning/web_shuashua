@@ -59,7 +59,7 @@ async function fetchLatestPapers() {
   console.log('[fetch] 开始获取最新论文...');
   
   try {
-    const url = `${BIORXIV_API}/details/biorxiv/100`;
+    const url = `${BIORXIV_API}/details/biorxiv/300`;
     const response = await fetch(url, {
       headers: {
         'Accept': 'application/json',
@@ -79,7 +79,8 @@ async function fetchLatestPapers() {
         category: item.category || 'Biology',
         summary: item.abstract || '暂无摘要',
         link: `https://doi.org/${item.doi}`,
-        doi: item.doi
+        doi: item.doi,
+        license: item.license || ''
       }));
       
       lastUpdateTime = Date.now();
