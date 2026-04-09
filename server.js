@@ -59,7 +59,7 @@ async function fetchLatestPapers() {
   console.log('[fetch] 开始获取最新论文...');
   
   try {
-    const url = `${BIORXIV_API}/details/biorxiv/300`;
+    const url = `${BIORXIV_API}/details/biorxiv/100`;
     const response = await fetch(url, {
       headers: {
         'Accept': 'application/json',
