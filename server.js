@@ -460,7 +460,8 @@ app.get('/api/ai-summary-one', async (req, res) => {
 
 // ─── 启动 ───
 app.listen(PORT, async () => {
-  console.log(`\n🚀 bioRxiv 后端启动 | 端口 ${PORT}`);
+  console.log(`
+🚀 bioRxiv 后端启动 | 端口 ${PORT}`);
   console.log(`   API: https://shuashua.zeabur.app/api`);
   console.log(`   论文: https://shuashua.zeabur.app/api/latest`);
   console.log(`   健康: https://shuashua.zeabur.app/api/health`);
@@ -477,4 +478,50 @@ app.listen(PORT, async () => {
     console.log('[startup] 暂无中文总结，立即生成...');
     generateAISummaries().catch(e => console.error('[startup] 失败:', e.message));
   }
+
+  startScheduler();
 });
+
+// ─── 每日定时任务（早8点 + 晚8点）───
+let lastScheduledRun = 0;
+
+function scheduleNextRun() {
+  const now = new Date();
+  const targets = [8, 20].map(h => {
+    const t = new Date(now);
+    t.setHours(h, 0, 0, 0);
+    if (t <= now) t.setDate(t.getDate() + 1);
+    return t.getTime();
+  });
+  return Math.min(...targets) - now.getTime();
+}
+
+async function scheduledUpdate() {
+  const today = new Date().toISOString().split('T')[0];
+  if (String(lastScheduledRun) === today) {
+    console.log(`[schedule] 今日(${today})已执行过，跳过`);
+    return;
+  }
+  console.log(`[schedule] ⏰ 定时更新开始 (${new Date().toISOString()})`);
+  try {
+    const fetched = await fetchLatestPapers();
+    if (fetched) {
+      const result = await generateAISummaries(false);
+      console.log(`[schedule] ✅ 完成：总结 ${result.success} 篇，失败 ${result.failed} 篇`);
+    } else {
+      console.log('[schedule] ⚠️ bioRxiv 不可达，跳过');
+    }
+  } catch (e) {
+    console.error('[schedule] ❌ 异常:', e.message);
+  }
+  lastScheduledRun = today;
+}
+
+function startScheduler() {
+  const ms = scheduleNextRun();
+  console.log(`[schedule] 定时器已启动，距下次执行 ${Math.round(ms / 60000)} 分钟`);
+  setTimeout(() => {
+    scheduledUpdate();
+    setInterval(scheduledUpdate, 24 * 60 * 60 * 1000);
+  }, ms);
+}
