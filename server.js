@@ -200,7 +200,7 @@ async function generateAISummaries(forceRegenerate = false) {
       const { reply, results } = await aiSummarizeBatch(batch);
 
       results.forEach(r => {
-        const paper = papersNeedingSummary[r.idx];
+        const paper = papersNeedingSummary[i + r.idx];
         if (r.parsed) {
           paper.aiSummary = r.parsed;
           success++;
