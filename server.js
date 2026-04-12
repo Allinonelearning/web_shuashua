@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 // ─── AI 摘要配置 ───
 const AI_API_KEY = process.env.AI_API_KEY || 'sk-vEvVBRVOEfZdtoipoKZnVxEQQOZdPmOYUDFqwx0IWIOnir2x';
 const AI_BASE_URL = 'https://api.chatanywhere.org/v1';
-const AI_MODEL = 'gpt-5.1-ca';
+const AI_MODEL = 'gpt-4o-mini';
 const AI_TIMEOUT_MS = 60000; // 60秒超时
 
 // 用 AbortController 实现超时
