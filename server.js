@@ -96,8 +96,15 @@ function saveCacheToFile() {
 }
 
 // ─── AI 生成中文摘要 ───
+// 只对最新 100 篇论文生成总结（按日期倒序）
+function getPapersNeedingSummary(forceRegenerate = false) {
+  const sorted = [...papersCache].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const top100 = sorted.slice(0, 100);
+  return forceRegenerate ? top100 : top100.filter(p => !p.aiSummary);
+}
+
 async function generateAISummaries(forceRegenerate = false) {
-  const papersNeedingSummary = papersCache.filter(p => !p.aiSummary || forceRegenerate);
+  const papersNeedingSummary = getPapersNeedingSummary(forceRegenerate);
   const total = papersNeedingSummary.length;
 
   if (total === 0) {
@@ -116,20 +123,20 @@ async function generateAISummaries(forceRegenerate = false) {
     const totalBatches = Math.ceil(total / BATCH_SIZE);
     console.log(`[AI] 批次 ${batchNum}/${totalBatches}（${batch.length} 篇）`);
 
-    const batchText = batch
+    const paperBlocks = batch
       .map((p, idx) => `[论文${idx + 1}]\n标题：${p.title}\n作者：${p.authors}\n分类：${p.category}\n原始摘要：${p.summary}`)
       .join('\n\n');
 
-    const prompt = `你是一位生物医学学术助手。请为以下论文生成简洁的中文摘要（每篇 100-150 字），包含：研究背景、主要方法和关键发现。
+    const outputFormat = batch
+      .map((_, idx) => `论文${idx + 1}摘要：...`)
+      .join('\n');
 
-${batchText}
+    const prompt = `你是一位生物医学学术助手。请为以下论文生成简洁的中文总结（每篇 100-150 字），包含：研究背景、主要方法和关键发现。
+
+${paperBlocks}
 
 请严格按以下格式输出（只输出摘要，不要其他内容）：
-论文1摘要：...
-论文2摘要：...
-论文3摘要：...
-论文4摘要：...
-论文5摘要：...`;
+${outputFormat}`;
 
     try {
       const res = await aiPost('/chat/completions', {
