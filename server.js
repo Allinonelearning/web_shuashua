@@ -413,6 +413,18 @@ app.get('/api/ai-summary', async (req, res) => {
   }
 });
 
+// 📥 下载当前缓存（用于备份到 Git，Zeabur 重启后恢复）
+app.get('/api/download-cache', async (req, res) => {
+  const secret = process.env.REFRESH_SECRET || 'shuashua_refresh_secret';
+  if (req.query.secret !== secret) return res.status(403).json({ error: 'Forbidden' });
+  res.json({
+    papers: papersCache,
+    lastUpdate: lastUpdateTime,
+    lastAISummaryTime: lastAISummaryTime,
+    updateTime: new Date().toISOString()
+  });
+});
+
 // 手动给单篇论文补充中文总结
 app.get('/api/ai-summary-one', async (req, res) => {
   const secret = process.env.REFRESH_SECRET || 'shuashua_refresh_secret';
