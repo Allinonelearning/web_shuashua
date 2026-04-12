@@ -13,9 +13,8 @@ const AI_BASE_URL = 'https://api.chatanywhere.tech/v1';
 const AI_MODEL = 'gpt-5.1-ca';
 const AI_TIMEOUT_MS = 45000;
 
-// 通用 POST 封装（兼容 node-fetch v2/v3）
 function aiPost(endpoint, body) {
-  const makeRequest = (fetchFn) => fetchFn(AI_BASE_URL + endpoint, {
+  return fetch(AI_BASE_URL + endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -24,10 +23,6 @@ function aiPost(endpoint, body) {
     body: JSON.stringify(body),
     timeout: AI_TIMEOUT_MS
   });
-
-  // node-fetch v3 返回 Promise，直接用
-  // node-fetch v2 用法同 v3
-  return makeRequest(fetch);
 }
 
 // ─── CORS ───
@@ -59,6 +54,14 @@ function formatDate(dateString) {
   if (!dateString) return '';
   const date = new Date(dateString);
   return date.toISOString().split('T')[0];
+}
+
+// 获取日期范围字符串
+function getDateRange(days = 30) {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  return `${start.toISOString().split('T')[0]}/${end.toISOString().split('T')[0]}`;
 }
 
 // 从文件加载缓存
@@ -156,14 +159,13 @@ ${batchText}
       });
 
       saveCacheToFile();
-      console.log(`[AI] 批次 ${batchNum} 完成，当前成功 ${success}，失败 ${failed}`);
+      console.log(`[AI] 批次 ${batchNum} 完成，成功 ${success}，失败 ${failed}`);
 
     } catch (e) {
       console.error(`[AI] 批次 ${batchNum} 失败: ${e.message}`);
       failed += batch.length;
     }
 
-    // 批次间暂停 1 秒防限流
     if (i + BATCH_SIZE < papersNeedingSummary.length) {
       await new Promise(r => setTimeout(r, 1000));
     }
@@ -174,11 +176,39 @@ ${batchText}
   console.log(`[AI] 摘要生成完成！成功 ${success} 篇，失败 ${failed} 篇`);
 }
 
-// 从 bioRxiv 获取最新论文
+// 从 bioRxiv 获取论文（尝试多个端点）
 async function fetchLatestPapers() {
   console.log('[fetch] 开始获取最新论文...');
 
-  try {
+  // 方法1：日期范围端点（过去30天）
+  const tryDateRange = async () => {
+    const dateRange = getDateRange(30);
+    console.log(`[fetch] 尝试日期范围: ${dateRange}`);
+    const url = `${BIORXIV_API}/details/biorxiv/${dateRange}/0/json`;
+    console.log(`[fetch] URL: ${url}`);
+
+    const response = await fetch(url, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'ShuaShuaWenXian/1.0'
+      },
+      timeout: 30000
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (data.collection && data.collection.length > 0) {
+      return data.collection;
+    }
+    return null;
+  };
+
+  // 方法2：数字端点（最近N篇）
+  const tryNumeric = async () => {
+    console.log('[fetch] 尝试数字端点: /details/biorxiv/100');
     const url = `${BIORXIV_API}/details/biorxiv/100`;
     const response = await fetch(url, {
       headers: {
@@ -188,13 +218,63 @@ async function fetchLatestPapers() {
       timeout: 30000
     });
 
-    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
 
+    const data = await response.json();
     if (data.collection && data.collection.length > 0) {
+      return data.collection;
+    }
+    return null;
+  };
+
+  try {
+    let collection = null;
+    let method = '';
+
+    try {
+      collection = await tryDateRange();
+      method = '日期范围';
+    } catch (e) {
+      console.log(`[fetch] 日期范围失败: ${e.message}`);
+    }
+
+    if (!collection) {
+      try {
+        collection = await tryNumeric();
+        method = '数字';
+      } catch (e) {
+        console.log(`[fetch] 数字端点失败: ${e.message}`);
+      }
+    }
+
+    if (!collection) {
+      // 方法3：更短的时间范围
+      const shortRange = getDateRange(7);
+      console.log(`[fetch] 尝试短范围: ${shortRange}`);
+      const url = `${BIORXIV_API}/details/biorxiv/${shortRange}/0/json`;
+      const response = await fetch(url, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'ShuaShuaWenXian/1.0'
+        },
+        timeout: 30000
+      });
+      const data = await response.json();
+      if (data.collection && data.collection.length > 0) {
+        collection = data.collection;
+        method = '短日期范围';
+      }
+    }
+
+    if (collection) {
+      console.log(`[fetch] 成功（${method}），共 ${collection.length} 篇`);
+
       // 保留已有摘要
       const existingMap = new Map(papersCache.map(p => [p.id, p]));
 
-      papersCache = data.collection.map(item => {
+      papersCache = collection.map(item => {
         const id = item.doi || item.url;
         const existing = existingMap.get(id);
         return {
@@ -213,16 +293,18 @@ async function fetchLatestPapers() {
 
       lastUpdateTime = Date.now();
       saveCacheToFile();
-      console.log(`[fetch] 获取成功: ${papersCache.length} 篇论文`);
+      console.log(`[fetch] 处理完成: ${papersCache.length} 篇论文`);
       return true;
     }
+
+    console.error('[fetch] 所有端点均返回空数据');
   } catch (e) {
-    console.error('[fetch] 获取失败:', e.message);
+    console.error(`[fetch] 获取失败: ${e.message}`);
   }
   return false;
 }
 
-// 定时任务：每天 8:00, 12:00, 20:00 更新
+// 定时任务
 function scheduleUpdates() {
   const updateTimes = [8, 12, 20];
 
@@ -273,11 +355,9 @@ app.get('/api/latest', async (req, res) => {
       generateAISummaries().catch(() => {});
     }
 
-    const data = papersCache.slice(c, c + p);
-
     res.json({
       success: true,
-      data: data,
+      data: papersCache.slice(c, c + p),
       total: papersCache.length,
       cursor: c + p
     });
@@ -290,10 +370,7 @@ app.get('/api/latest', async (req, res) => {
 app.get('/api/search', async (req, res) => {
   try {
     const query = (req.query.query || '').trim().toLowerCase();
-
-    if (!query) {
-      return res.json({ success: true, data: [], total: 0 });
-    }
+    if (!query) return res.json({ success: true, data: [], total: 0 });
 
     const results = papersCache.filter(p =>
       p.title.toLowerCase().includes(query) ||
@@ -303,11 +380,7 @@ app.get('/api/search', async (req, res) => {
       (p.aiSummary && p.aiSummary.toLowerCase().includes(query))
     );
 
-    res.json({
-      success: true,
-      data: results.slice(0, 20),
-      total: results.length
-    });
+    res.json({ success: true, data: results.slice(0, 20), total: results.length });
   } catch (error) {
     console.error('[search error]', error);
     res.status(500).json({ success: false, error: error.message });
@@ -321,9 +394,7 @@ app.get('/api/refresh', async (req, res) => {
   }
 
   const ok = await fetchLatestPapers();
-  if (ok) {
-    await generateAISummaries(req.query.forceAI === '1');
-  }
+  if (ok) await generateAISummaries(req.query.forceAI === '1');
 
   res.json({
     success: ok,
@@ -381,7 +452,6 @@ app.listen(PORT, async () => {
   if (papersCache.length === 0) {
     console.log('[startup] 缓存为空，立即获取数据...');
     await fetchLatestPapers();
-    console.log('[startup] 缓存已加载，等待 AI 摘要生成...');
   }
 
   const missing = papersCache.filter(p => !p.aiSummary).length;
