@@ -118,20 +118,18 @@ async function aiSummarizeOne(paper) {
   return { raw: reply, parsed: reply.trim() };
 }
 
-// ─── AI 批量摘要 ───
+// ─── AI 批量摘要（JSON 格式解析）───
 async function aiSummarizeBatch(batch) {
   const paperBlocks = batch
     .map((p, idx) => `[论文${idx + 1}]\n标题：${p.title}\n作者：${p.authors}\n分类：${p.category}\n原始摘要：${p.summary}`)
     .join('\n\n');
 
-  const outputFormat = batch.map((_, idx) => `论文${idx + 1}摘要：...`).join('\n');
-
   const prompt = `你是一位生物医学学术助手。请为以下论文生成简洁的中文总结（每篇100-150字），包含：研究背景、主要方法、关键发现。
 
 ${paperBlocks}
 
-请严格按以下格式输出（只输出摘要，不要其他内容）：
-${outputFormat}`;
+请严格按以下JSON数组格式输出（只输出JSON，不要其他内容）：
+[{"index":0,"摘要":"..."},{"index":1,"摘要":"..."},...]`;
 
   console.log('[batch] 发送请求，batch size:', batch.length);
 
@@ -139,7 +137,7 @@ ${outputFormat}`;
     model: AI_MODEL,
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.3,
-    max_tokens: 2000,
+    max_tokens: 3000,
   });
 
   console.log('[batch] HTTP 状态:', res.status);
@@ -151,19 +149,27 @@ ${outputFormat}`;
 
   const json = await res.json();
   const reply = (json.choices && json.choices[0] && json.choices[0].message.content) || '';
+  console.log('[batch] AI 回复:\n', reply.substring(0, 800));
 
-  console.log('[batch] AI 回复原文:');
-  console.log(reply);
-  console.log('---');
+  // JSON 解析（容错）
+  let parsed = null;
+  try {
+    const jsonMatch = reply.match(/\[[\s\S]*?\]/);
+    if (jsonMatch) {
+      parsed = JSON.parse(jsonMatch[0]);
+    }
+  } catch (e) {
+    console.warn('[batch] JSON解析失败，尝试备用解析');
+  }
 
   const results = [];
   batch.forEach((paper, idx) => {
-    const escapedIdx = idx + 1;
-    const nextIdx = idx + 2;
-    const regex = new RegExp(`论文${escapedIdx}摘要[：:]\\s*([\\s\\S]*?)(?=论文${nextIdx}摘要|$)`, 'i');
-    const match = reply.match(regex);
-    const parsed = match ? match[1].trim().replace(/^["""]|["""]$/g, '') : '';
-    results.push({ idx, doi: paper.doi, parsed, matched: !!match });
+    let parsedText = '';
+    if (parsed && Array.isArray(parsed)) {
+      const entry = parsed.find(e => e.index === idx);
+      if (entry && entry.摘要) parsedText = entry.摘要;
+    }
+    results.push({ idx, doi: paper.doi, parsed: parsedText, matched: !!parsedText });
   });
 
   return { reply, results };
@@ -202,6 +208,12 @@ async function generateAISummaries(forceRegenerate = false) {
           failed++;
           console.warn(`[AI] 论文 ${r.doi} 解析失败（matched=${r.matched}）`);
         }
+      });
+
+      // 打印本批次解析详情
+      results.forEach(r => {
+        const status = r.parsed ? '✅' : '❌';
+        console.log(`  ${status} 论文${r.idx + 1}: ${r.parsed ? r.parsed.substring(0, 40) + '...' : '解析为空'}`);
       });
 
       saveCacheToFile();
