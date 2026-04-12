@@ -3,11 +3,38 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
+const { OpenAI } = require('openai');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// ─── AI 摘要配置 ───
+const AI_API_KEY = process.env.AI_API_KEY || 'sk-vEvVBRVOEfZdtoipoKZnVxEQQOZdPmOYUDFqwx0IWIOnir2x';
+const AI_BASE_URL = 'https://api.chatanywhere.tech/v1';
+const AI_MODEL = 'gpt-5.1-ca';
+const AI_TIMEOUT_MS = 45000; // 45秒超时
+
+// 初始化 OpenAI 客户端
+const openai = new OpenAI({
+  apiKey: AI_API_KEY,
+  baseURL: AI_BASE_URL,
+  timeout: AI_TIMEOUT_MS,
+});
+
+// ─── CORS ───
+const ALLOWED_ORIGINS = [
+  'https://servicewechat.com',
+  'https://mp.weixin.qq.com',
+];
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
 app.use(express.json());
 
 const BIORXIV_API = 'https://api.biorxiv.org';
@@ -16,6 +43,7 @@ const CACHE_FILE = path.join(__dirname, 'papers_cache.json');
 // 内存缓存
 let papersCache = [];
 let lastUpdateTime = 0;
+let lastAISummaryTime = 0;
 
 // 格式化日期
 function formatDate(dateString) {
@@ -32,6 +60,7 @@ function loadCacheFromFile() {
       const cache = JSON.parse(data);
       papersCache = cache.papers || [];
       lastUpdateTime = cache.lastUpdate || 0;
+      lastAISummaryTime = cache.lastAISummaryTime || 0;
       console.log(`[cache] 从文件加载 ${papersCache.length} 篇论文`);
     }
   } catch (e) {
@@ -45,19 +74,105 @@ function saveCacheToFile() {
     const data = {
       papers: papersCache,
       lastUpdate: lastUpdateTime,
+      lastAISummaryTime: lastAISummaryTime,
       updateTime: new Date().toISOString()
     };
     fs.writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2));
-    console.log(`[cache] 保存到文件: ${papersCache.length} 篇论文`);
   } catch (e) {
     console.error('[cache] 保存缓存文件失败:', e.message);
   }
 }
 
+// ─── AI 生成中文摘要 ───
+// 每次批量处理 5 篇，超时自动跳过该篇
+async function generateAISummaries(forceRegenerate = false) {
+  // 找出还没有摘要的论文
+  const papersNeedingSummary = papersCache.filter(p => !p.aiSummary || forceRegenerate);
+  const total = papersNeedingSummary.length;
+
+  if (total === 0) {
+    console.log('[AI] 所有论文已有摘要，跳过');
+    return;
+  }
+
+  console.log(`[AI] 开始生成摘要，共 ${total} 篇待处理...`);
+  let processed = 0;
+  let success = 0;
+  let failed = 0;
+
+  // 每批 5 篇
+  const BATCH_SIZE = 5;
+
+  for (let i = 0; i < papersNeedingSummary.length; i += BATCH_SIZE) {
+    const batch = papersNeedingSummary.slice(i, i + BATCH_SIZE);
+    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(total / BATCH_SIZE);
+    console.log(`[AI] 处理批次 ${batchNum}/${totalBatches}（${batch.length} 篇）`);
+
+    const batchText = batch
+      .map((p, idx) => `[论文${idx + 1}]\n标题：${p.title}\n作者：${p.authors}\n分类：${p.category}\n原始摘要：${p.summary}`)
+      .join('\n\n');
+
+    const prompt = `你是一位生物医学学术助手。请为以下论文生成简洁的中文摘要（每篇 100-150 字），包含：研究背景、主要方法和关键发现。
+
+${batchText}
+
+请按以下格式输出（只输出摘要，不要其他内容）：
+论文1摘要：...
+论文2摘要：...
+论文3摘要：...
+论文4摘要：...
+论文5摘要：...`;
+
+    try {
+      const response = await openai.chat.completions.create({
+        model: AI_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3,
+        max_tokens: 2000,
+      });
+
+      const reply = response.choices[0].message.content.trim();
+
+      // 解析每篇摘要
+      batch.forEach((paper, idx) => {
+        const regex = new RegExp(`论文${idx + 1}摘要[：:]\s*([\\s\\S]*?)(?=论文${idx + 2}摘要|$)`, 'i');
+        const match = reply.match(regex);
+        if (match) {
+          const summary = match[1].trim().replace(/^["""]|["""]$/g, '');
+          paper.aiSummary = summary;
+          success++;
+        } else {
+          failed++;
+        }
+        processed++;
+      });
+
+      // 每批次处理完保存一次，防止中途崩溃丢失
+      saveCacheToFile();
+
+    } catch (e) {
+      console.error(`[AI] 批次 ${batchNum} 失败: ${e.message}`);
+      // 这批全部标记为失败，继续下一批
+      failed += batch.length;
+      processed += batch.length;
+    }
+
+    // 批次间暂停 1 秒，防止触发限流
+    if (i + BATCH_SIZE < papersNeedingSummary.length) {
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  lastAISummaryTime = Date.now();
+  saveCacheToFile();
+  console.log(`[AI] 摘要生成完成！成功 ${success} 篇，失败 ${failed} 篇`);
+}
+
 // 从 bioRxiv 获取最新论文
 async function fetchLatestPapers() {
   console.log('[fetch] 开始获取最新论文...');
-  
+
   try {
     const url = `${BIORXIV_API}/details/biorxiv/100`;
     const response = await fetch(url, {
@@ -67,22 +182,31 @@ async function fetchLatestPapers() {
       },
       timeout: 30000
     });
-    
+
     const data = await response.json();
-    
+
     if (data.collection && data.collection.length > 0) {
-      papersCache = data.collection.map(item => ({
-        id: item.doi || item.url,
-        title: item.title || '无标题',
-        authors: (item.authors || '').split(';').slice(0, 3).join(', '),
-        date: formatDate(item.date),
-        category: item.category || 'Biology',
-        summary: item.abstract || '暂无摘要',
-        link: `https://doi.org/${item.doi}`,
-        doi: item.doi,
-        license: item.license || ''
-      }));
-      
+      // 保留已有摘要
+      const existingMap = new Map(papersCache.map(p => [p.id, p]));
+
+      papersCache = data.collection.map(item => {
+        const id = item.doi || item.url;
+        const existing = existingMap.get(id);
+        return {
+          id: id,
+          title: item.title || '无标题',
+          authors: (item.authors || '').split(';').slice(0, 3).join(', '),
+          date: formatDate(item.date),
+          category: item.category || 'Biology',
+          summary: item.abstract || '暂无摘要',
+          link: `https://doi.org/${item.doi}`,
+          doi: item.doi,
+          license: item.license || '',
+          // 保留已有摘要，新论文 aiSummary 为空
+          aiSummary: existing ? existing.aiSummary : ''
+        };
+      });
+
       lastUpdateTime = Date.now();
       saveCacheToFile();
       console.log(`[fetch] 获取成功: ${papersCache.length} 篇论文`);
@@ -96,37 +220,44 @@ async function fetchLatestPapers() {
 
 // 定时任务：每天 8:00, 12:00, 20:00 更新
 function scheduleUpdates() {
-  const updateTimes = [8, 12, 20]; // 早中晚
-  
+  const updateTimes = [8, 12, 20];
+
   function checkAndUpdate() {
     const now = new Date();
     const hour = now.getHours();
     const minute = now.getMinutes();
-    
-    // 整点时检查是否需要更新
+
     if (minute === 0 && updateTimes.includes(hour)) {
       console.log(`[schedule] 定时更新触发: ${hour}:00`);
-      fetchLatestPapers();
+      // 更新论文 + AI 摘要
+      fetchLatestPapers().then(ok => {
+        if (ok) generateAISummaries();
+      });
     }
   }
-  
-  // 每分钟检查一次
+
   setInterval(checkAndUpdate, 60000);
-  
-  // 启动时如果缓存超过4小时，也更新一次
+
+  // 启动时缓存超过4小时，也更新一次
   if (Date.now() - lastUpdateTime > 4 * 60 * 60 * 1000) {
     console.log('[schedule] 缓存过期，启动更新');
-    fetchLatestPapers();
+    fetchLatestPapers().then(ok => {
+      if (ok) generateAISummaries();
+    });
   }
 }
 
+// ─── API 路由 ───
+
 // 健康检查
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     cached_papers: papersCache.length,
-    last_update: lastUpdateTime ? new Date(lastUpdateTime).toISOString() : 'never'
+    last_update: lastUpdateTime ? new Date(lastUpdateTime).toISOString() : 'never',
+    last_ai_summary: lastAISummaryTime ? new Date(lastAISummaryTime).toISOString() : 'never',
+    ai_ready: papersCache.filter(p => p.aiSummary).length
   });
 });
 
@@ -135,15 +266,16 @@ app.get('/api/latest', async (req, res) => {
   try {
     const { cursor = 0, perPage = 50 } = req.query;
     const c = parseInt(cursor) || 0;
-    const p = parseInt(perPage) || 50;
-    
-    // 如果缓存为空或超过4小时未更新，同步获取
+    const p = Math.min(parseInt(perPage) || 50, 200);
+
     if (papersCache.length === 0 || Date.now() - lastUpdateTime > 4 * 60 * 60 * 1000) {
       await fetchLatestPapers();
+      // 如果新论文缺少摘要，异步生成（不等完成）
+      generateAISummaries().catch(() => {});
     }
-    
+
     const data = papersCache.slice(c, c + p);
-    
+
     res.json({
       success: true,
       data: data,
@@ -160,18 +292,19 @@ app.get('/api/latest', async (req, res) => {
 app.get('/api/search', async (req, res) => {
   try {
     const query = (req.query.query || '').trim().toLowerCase();
-    
+
     if (!query) {
       return res.json({ success: true, data: [], total: 0 });
     }
-    
+
     const results = papersCache.filter(p =>
       p.title.toLowerCase().includes(query) ||
       p.authors.toLowerCase().includes(query) ||
       p.category.toLowerCase().includes(query) ||
-      p.summary.toLowerCase().includes(query)
+      p.summary.toLowerCase().includes(query) ||
+      (p.aiSummary && p.aiSummary.toLowerCase().includes(query))
     );
-    
+
     res.json({
       success: true,
       data: results.slice(0, 20),
@@ -183,13 +316,43 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// 手动刷新缓存
+// 手动刷新缓存（需带 ?secret=xxx）
 app.get('/api/refresh', async (req, res) => {
+  const secret = process.env.REFRESH_SECRET || 'shuashua_refresh_secret';
+  if (req.query.secret !== secret) {
+    return res.status(403).json({ success: false, error: 'Forbidden' });
+  }
+
+  const forceRegenerate = req.query.forceAI === '1';
+
   const ok = await fetchLatestPapers();
-  res.json({ 
-    success: ok, 
+  if (ok) {
+    // 强制刷新时也重新生成 AI 摘要
+    await generateAISummaries(forceRegenerate);
+  }
+
+  res.json({
+    success: ok,
     message: ok ? '刷新成功' : '刷新失败',
-    count: papersCache.length
+    count: papersCache.length,
+    aiReady: papersCache.filter(p => p.aiSummary).length
+  });
+});
+
+// 单独触发 AI 摘要生成
+app.get('/api/ai-summary', async (req, res) => {
+  const secret = process.env.REFRESH_SECRET || 'shuashua_refresh_secret';
+  if (req.query.secret !== secret) {
+    return res.status(403).json({ success: false, error: 'Forbidden' });
+  }
+
+  const force = req.query.force === '1';
+  await generateAISummaries(force);
+
+  res.json({
+    success: true,
+    total: papersCache.length,
+    aiReady: papersCache.filter(p => p.aiSummary).length
   });
 });
 
@@ -204,31 +367,36 @@ app.get('/api/categories', (req, res) => {
   });
 });
 
-// 启动
+// ─── 启动 ───
 app.listen(PORT, async () => {
   console.log(`
 ╔═══════════════════════════════════════════════════╗
-║        bioRxiv API 后端服务 (定时更新版)          ║
+║       bioRxiv API 后端服务 (AI摘要版)            ║
 ╠═══════════════════════════════════════════════════╣
 ║  📖 最新论文: http://localhost:${PORT}/api/latest    ║
 ║  🔍 搜索:    http://localhost:${PORT}/api/search     ║
 ║  🔄 手动刷新: http://localhost:${PORT}/api/refresh   ║
+║  🤖 AI摘要:  http://localhost:${PORT}/api/ai-summary║
 ║  ❤️ 健康检查: http://localhost:${PORT}/api/health   ║
 ║                                                   ║
-║  ⏰ 定时更新: 每天 8:00, 12:00, 20:00             ║
+║  ⏰ 定时更新: 每天 8:00, 12:00, 20:00            ║
 ║  💾 缓存文件: papers_cache.json                   ║
 ╚═══════════════════════════════════════════════════╝
   `);
-  
-  // 启动时加载缓存
+
   loadCacheFromFile();
-  
-  // 启动定时任务
   scheduleUpdates();
-  
-  // 如果缓存为空，立即获取一次
+
   if (papersCache.length === 0) {
     console.log('[startup] 缓存为空，立即获取数据...');
     await fetchLatestPapers();
+    console.log('[startup] 缓存已加载，等待 AI 摘要生成...');
+  }
+
+  // 启动后检查是否有论文缺少摘要，异步补充
+  const missing = papersCache.filter(p => !p.aiSummary).length;
+  if (missing > 0) {
+    console.log(`[startup] 发现 ${missing} 篇论文缺少 AI 摘要，后台生成中...`);
+    generateAISummaries().catch(e => console.error('[startup] AI摘要生成失败:', e.message));
   }
 });
