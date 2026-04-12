@@ -3,7 +3,6 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
-const { OpenAI } = require('openai');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,14 +11,24 @@ const PORT = process.env.PORT || 3000;
 const AI_API_KEY = process.env.AI_API_KEY || 'sk-vEvVBRVOEfZdtoipoKZnVxEQQOZdPmOYUDFqwx0IWIOnir2x';
 const AI_BASE_URL = 'https://api.chatanywhere.tech/v1';
 const AI_MODEL = 'gpt-5.1-ca';
-const AI_TIMEOUT_MS = 45000; // 45秒超时
+const AI_TIMEOUT_MS = 45000;
 
-// 初始化 OpenAI 客户端
-const openai = new OpenAI({
-  apiKey: AI_API_KEY,
-  baseURL: AI_BASE_URL,
-  timeout: AI_TIMEOUT_MS,
-});
+// 通用 POST 封装（兼容 node-fetch v2/v3）
+function aiPost(endpoint, body) {
+  const makeRequest = (fetchFn) => fetchFn(AI_BASE_URL + endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + AI_API_KEY
+    },
+    body: JSON.stringify(body),
+    timeout: AI_TIMEOUT_MS
+  });
+
+  // node-fetch v3 返回 Promise，直接用
+  // node-fetch v2 用法同 v3
+  return makeRequest(fetch);
+}
 
 // ─── CORS ───
 const ALLOWED_ORIGINS = [
@@ -84,9 +93,7 @@ function saveCacheToFile() {
 }
 
 // ─── AI 生成中文摘要 ───
-// 每次批量处理 5 篇，超时自动跳过该篇
 async function generateAISummaries(forceRegenerate = false) {
-  // 找出还没有摘要的论文
   const papersNeedingSummary = papersCache.filter(p => !p.aiSummary || forceRegenerate);
   const total = papersNeedingSummary.length;
 
@@ -96,18 +103,15 @@ async function generateAISummaries(forceRegenerate = false) {
   }
 
   console.log(`[AI] 开始生成摘要，共 ${total} 篇待处理...`);
-  let processed = 0;
   let success = 0;
   let failed = 0;
-
-  // 每批 5 篇
   const BATCH_SIZE = 5;
 
   for (let i = 0; i < papersNeedingSummary.length; i += BATCH_SIZE) {
     const batch = papersNeedingSummary.slice(i, i + BATCH_SIZE);
     const batchNum = Math.floor(i / BATCH_SIZE) + 1;
     const totalBatches = Math.ceil(total / BATCH_SIZE);
-    console.log(`[AI] 处理批次 ${batchNum}/${totalBatches}（${batch.length} 篇）`);
+    console.log(`[AI] 批次 ${batchNum}/${totalBatches}（${batch.length} 篇）`);
 
     const batchText = batch
       .map((p, idx) => `[论文${idx + 1}]\n标题：${p.title}\n作者：${p.authors}\n分类：${p.category}\n原始摘要：${p.summary}`)
@@ -117,7 +121,7 @@ async function generateAISummaries(forceRegenerate = false) {
 
 ${batchText}
 
-请按以下格式输出（只输出摘要，不要其他内容）：
+请严格按以下格式输出（只输出摘要，不要其他内容）：
 论文1摘要：...
 论文2摘要：...
 论文3摘要：...
@@ -125,40 +129,41 @@ ${batchText}
 论文5摘要：...`;
 
     try {
-      const response = await openai.chat.completions.create({
+      const res = await aiPost('/chat/completions', {
         model: AI_MODEL,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
         max_tokens: 2000,
       });
 
-      const reply = response.choices[0].message.content.trim();
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`API错误 ${res.status}: ${errText}`);
+      }
 
-      // 解析每篇摘要
+      const json = await res.json();
+      const reply = (json.choices && json.choices[0] && json.choices[0].message.content) || '';
+
       batch.forEach((paper, idx) => {
         const regex = new RegExp(`论文${idx + 1}摘要[：:]\s*([\\s\\S]*?)(?=论文${idx + 2}摘要|$)`, 'i');
         const match = reply.match(regex);
         if (match) {
-          const summary = match[1].trim().replace(/^["""]|["""]$/g, '');
-          paper.aiSummary = summary;
+          paper.aiSummary = match[1].trim().replace(/^["""]|["""]$/g, '');
           success++;
         } else {
           failed++;
         }
-        processed++;
       });
 
-      // 每批次处理完保存一次，防止中途崩溃丢失
       saveCacheToFile();
+      console.log(`[AI] 批次 ${batchNum} 完成，当前成功 ${success}，失败 ${failed}`);
 
     } catch (e) {
       console.error(`[AI] 批次 ${batchNum} 失败: ${e.message}`);
-      // 这批全部标记为失败，继续下一批
       failed += batch.length;
-      processed += batch.length;
     }
 
-    // 批次间暂停 1 秒，防止触发限流
+    // 批次间暂停 1 秒防限流
     if (i + BATCH_SIZE < papersNeedingSummary.length) {
       await new Promise(r => setTimeout(r, 1000));
     }
@@ -202,7 +207,6 @@ async function fetchLatestPapers() {
           link: `https://doi.org/${item.doi}`,
           doi: item.doi,
           license: item.license || '',
-          // 保留已有摘要，新论文 aiSummary 为空
           aiSummary: existing ? existing.aiSummary : ''
         };
       });
@@ -229,7 +233,6 @@ function scheduleUpdates() {
 
     if (minute === 0 && updateTimes.includes(hour)) {
       console.log(`[schedule] 定时更新触发: ${hour}:00`);
-      // 更新论文 + AI 摘要
       fetchLatestPapers().then(ok => {
         if (ok) generateAISummaries();
       });
@@ -238,7 +241,6 @@ function scheduleUpdates() {
 
   setInterval(checkAndUpdate, 60000);
 
-  // 启动时缓存超过4小时，也更新一次
   if (Date.now() - lastUpdateTime > 4 * 60 * 60 * 1000) {
     console.log('[schedule] 缓存过期，启动更新');
     fetchLatestPapers().then(ok => {
@@ -249,7 +251,6 @@ function scheduleUpdates() {
 
 // ─── API 路由 ───
 
-// 健康检查
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -261,7 +262,6 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// 获取最新论文
 app.get('/api/latest', async (req, res) => {
   try {
     const { cursor = 0, perPage = 50 } = req.query;
@@ -270,7 +270,6 @@ app.get('/api/latest', async (req, res) => {
 
     if (papersCache.length === 0 || Date.now() - lastUpdateTime > 4 * 60 * 60 * 1000) {
       await fetchLatestPapers();
-      // 如果新论文缺少摘要，异步生成（不等完成）
       generateAISummaries().catch(() => {});
     }
 
@@ -288,7 +287,6 @@ app.get('/api/latest', async (req, res) => {
   }
 });
 
-// 搜索论文
 app.get('/api/search', async (req, res) => {
   try {
     const query = (req.query.query || '').trim().toLowerCase();
@@ -316,19 +314,15 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// 手动刷新缓存（需带 ?secret=xxx）
 app.get('/api/refresh', async (req, res) => {
   const secret = process.env.REFRESH_SECRET || 'shuashua_refresh_secret';
   if (req.query.secret !== secret) {
     return res.status(403).json({ success: false, error: 'Forbidden' });
   }
 
-  const forceRegenerate = req.query.forceAI === '1';
-
   const ok = await fetchLatestPapers();
   if (ok) {
-    // 强制刷新时也重新生成 AI 摘要
-    await generateAISummaries(forceRegenerate);
+    await generateAISummaries(req.query.forceAI === '1');
   }
 
   res.json({
@@ -339,15 +333,13 @@ app.get('/api/refresh', async (req, res) => {
   });
 });
 
-// 单独触发 AI 摘要生成
 app.get('/api/ai-summary', async (req, res) => {
   const secret = process.env.REFRESH_SECRET || 'shuashua_refresh_secret';
   if (req.query.secret !== secret) {
     return res.status(403).json({ success: false, error: 'Forbidden' });
   }
 
-  const force = req.query.force === '1';
-  await generateAISummaries(force);
+  await generateAISummaries(req.query.force === '1');
 
   res.json({
     success: true,
@@ -356,7 +348,6 @@ app.get('/api/ai-summary', async (req, res) => {
   });
 });
 
-// 分类列表
 app.get('/api/categories', (req, res) => {
   res.json({
     success: true,
@@ -393,7 +384,6 @@ app.listen(PORT, async () => {
     console.log('[startup] 缓存已加载，等待 AI 摘要生成...');
   }
 
-  // 启动后检查是否有论文缺少摘要，异步补充
   const missing = papersCache.filter(p => !p.aiSummary).length;
   if (missing > 0) {
     console.log(`[startup] 发现 ${missing} 篇论文缺少 AI 摘要，后台生成中...`);
