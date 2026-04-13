@@ -86,17 +86,16 @@ function saveCacheToFile() {
 
 // ─── AI 单篇摘要（新闻报道风格） ───
 async function aiSummarizeOne(paper) {
-  const prompt = `你是一位科学记者。请为以下研究撰写一篇中文新闻报道（150字以内），按以下结构撰写：
+  const prompt = `你是一位科学记者。请为以下研究撰写中文新闻报道，严格按以下格式输出（用 || 分隔三段，不要换行，不要其他内容）：
 
-**导语**（第一句话，必须用一句话概括"谁做了什么、有什么用"）
-**要点**（2-3句话，解释研究方法/数据和核心发现）
-**意义**（一句话，说明这项研究对普通人的意义或未来价值）
+[导语一句话]||[要点2-3句话]||[意义一句话]
 
-写作要求：
-- 导语要像新闻标题一样抓人，避免"研究表明""本研究发现"等套话
-- 把专业术语换成普通人能理解的表达
-- 保持客观，不夸大
-- 直接输出正文，不要前缀和标题
+要求：
+- 导语：一句话概括"发现了什么/做了什么"，要抓人，避免"研究表明"等套话
+- 要点：方法+核心数据+发现，2-3句
+- 意义：对普通人的价值或未来影响，一句话
+- 专业术语换成普通人能懂的表达
+- 每段不超过60字
 
 原文信息：
 标题：${paper.title}
@@ -104,7 +103,7 @@ async function aiSummarizeOne(paper) {
 领域：${paper.category}
 摘要：${paper.summary}
 
-直接输出新闻报道正文：`;
+直接输出（格式：导语||要点||意义）：`;
 
   console.log('[debug] 发送请求到:', AI_BASE_URL + '/chat/completions');
   console.log('[debug] 模型:', AI_MODEL);
@@ -135,20 +134,21 @@ async function aiSummarizeBatch(batch) {
     .map((p, idx) => `[论文${idx + 1}]\n标题：${p.title}\n作者：${p.authors}\n领域：${p.category}\n摘要：${p.summary}`)
     .join('\n\n');
 
-  const prompt = `你是一位科学记者。请为以下每篇研究撰写中文新闻报道（每篇150字以内），按以下结构：
+  const prompt = `你是一位科学记者。请为以下每篇研究撰写中文新闻报道，严格按JSON格式输出（只输出JSON，不要其他内容）：
 
-**导语**：一句话概括"谁做了什么、有什么用"，要抓人眼球
-**要点**：2-3句话说明研究方法/数据和核心发现
-**意义**：一句话说明对普通人的意义或未来价值
+每篇格式：{"index":N,"导语":"一句话抓人开场","要点":"方法+数据+发现，2-3句","意义":"对普通人的价值，一句话"}
 
-写作要求：
-- 导语避免"研究表明""本研究发现"等套话
-- 把专业术语换成普通人能理解的表达
-- 每篇独立，不关联其他篇
-- 严格按JSON格式输出（只输出JSON，不要任何其他内容）：
-[{"index":0,"摘要":"新闻报道正文..."},{"index":1,"摘要":"..."},...]`;
+要求：
+- 导语：避免"研究表明""本研究发现"等套话，直接说发现了什么
+- 要点：包含关键数据或方法，2-3句，每句不超过40字
+- 意义：未来影响或实用价值，一句话
+- 专业术语换成普通人能懂的表达
 
-  const bodyWithPapers = `${paperBlocks}\n\n${prompt}`;
+${paperBlocks}
+
+输出JSON数组：`;
+
+  const bodyWithPapers = prompt;
 
   console.log('[batch] 发送请求，batch size:', batch.length);
 
@@ -186,7 +186,15 @@ async function aiSummarizeBatch(batch) {
     let parsedText = '';
     if (parsed && Array.isArray(parsed)) {
       const entry = parsed.find(e => e.index === idx);
-      if (entry && entry.摘要) parsedText = entry.摘要;
+      if (entry) {
+        // 新格式：导语||要点||意义（结构化存储）
+        if (entry.导语 && entry.要点 && entry.意义) {
+          parsedText = `${entry.导语}||${entry.要点}||${entry.意义}`;
+        } else if (entry.摘要) {
+          // 兼容旧格式
+          parsedText = entry.摘要;
+        }
+      }
     }
     results.push({ idx, doi: paper.doi, parsed: parsedText, matched: !!parsedText });
   });
