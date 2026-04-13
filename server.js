@@ -84,16 +84,27 @@ function saveCacheToFile() {
   }
 }
 
-// ─── AI 单篇摘要（用于 debug） ───
+// ─── AI 单篇摘要（新闻报道风格） ───
 async function aiSummarizeOne(paper) {
-  const prompt = `请为以下论文生成简洁的中文总结（100-150字），包含：研究背景、主要方法、关键发现。
+  const prompt = `你是一位科学记者。请为以下研究撰写一篇中文新闻报道（150字以内），按以下结构撰写：
 
+**导语**（第一句话，必须用一句话概括"谁做了什么、有什么用"）
+**要点**（2-3句话，解释研究方法/数据和核心发现）
+**意义**（一句话，说明这项研究对普通人的意义或未来价值）
+
+写作要求：
+- 导语要像新闻标题一样抓人，避免"研究表明""本研究发现"等套话
+- 把专业术语换成普通人能理解的表达
+- 保持客观，不夸大
+- 直接输出正文，不要前缀和标题
+
+原文信息：
 标题：${paper.title}
 作者：${paper.authors}
-分类：${paper.category}
-原始摘要：${paper.summary}
+领域：${paper.category}
+摘要：${paper.summary}
 
-请直接输出中文总结，不要前缀：`;
+直接输出新闻报道正文：`;
 
   console.log('[debug] 发送请求到:', AI_BASE_URL + '/chat/completions');
   console.log('[debug] 模型:', AI_MODEL);
@@ -118,24 +129,32 @@ async function aiSummarizeOne(paper) {
   return { raw: reply, parsed: reply.trim() };
 }
 
-// ─── AI 批量摘要（JSON 格式解析）───
+// ─── AI 批量摘要（新闻报道风格）───
 async function aiSummarizeBatch(batch) {
   const paperBlocks = batch
-    .map((p, idx) => `[论文${idx + 1}]\n标题：${p.title}\n作者：${p.authors}\n分类：${p.category}\n原始摘要：${p.summary}`)
+    .map((p, idx) => `[论文${idx + 1}]\n标题：${p.title}\n作者：${p.authors}\n领域：${p.category}\n摘要：${p.summary}`)
     .join('\n\n');
 
-  const prompt = `你是一位生物医学学术助手。请为以下论文生成简洁的中文总结（每篇100-150字），包含：研究背景、主要方法、关键发现。
+  const prompt = `你是一位科学记者。请为以下每篇研究撰写中文新闻报道（每篇150字以内），按以下结构：
 
-${paperBlocks}
+**导语**：一句话概括"谁做了什么、有什么用"，要抓人眼球
+**要点**：2-3句话说明研究方法/数据和核心发现
+**意义**：一句话说明对普通人的意义或未来价值
 
-请严格按以下JSON数组格式输出（只输出JSON，不要其他内容）：
-[{"index":0,"摘要":"..."},{"index":1,"摘要":"..."},...]`;
+写作要求：
+- 导语避免"研究表明""本研究发现"等套话
+- 把专业术语换成普通人能理解的表达
+- 每篇独立，不关联其他篇
+- 严格按JSON格式输出（只输出JSON，不要任何其他内容）：
+[{"index":0,"摘要":"新闻报道正文..."},{"index":1,"摘要":"..."},...]`;
+
+  const bodyWithPapers = `${paperBlocks}\n\n${prompt}`;
 
   console.log('[batch] 发送请求，batch size:', batch.length);
 
   const res = await aiPost('/chat/completions', {
     model: AI_MODEL,
-    messages: [{ role: 'user', content: prompt }],
+    messages: [{ role: 'user', content: bodyWithPapers }],
     temperature: 0.3,
     max_tokens: 3000,
   });
