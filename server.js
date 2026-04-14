@@ -432,6 +432,20 @@ app.get('/api/refresh', async (req, res) => {
   res.json({ success: ok, count: papersCache.length, message: ok ? '刷新成功' : '刷新失败（bioRxiv不可达）' });
 });
 
+// 🗑️ 清空缓存（重新开始）
+app.get('/api/clear-cache', async (req, res) => {
+  const secret = process.env.REFRESH_SECRET || 'shuashua_refresh_secret';
+  if (req.query.secret !== secret) return res.status(403).json({ success: false, error: 'Forbidden' });
+  papersCache = [];
+  lastUpdateTime = 0;
+  lastAISummaryTime = 0;
+  // 删除缓存文件
+  if (fs.existsSync(CACHE_FILE)) {
+    fs.unlinkSync(CACHE_FILE);
+  }
+  res.json({ success: true, message: '缓存已清空，请调用 /api/refresh 重新获取论文' });
+});
+
 // 📝 生成中文总结（最新100篇中缺总结的）
 app.get('/api/ai-summary', async (req, res) => {
   const secret = process.env.REFRESH_SECRET || 'shuashua_refresh_secret';
