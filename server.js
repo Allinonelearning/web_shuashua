@@ -217,6 +217,9 @@ async function generateAISummaries(forceRegenerate = false) {
   let success = 0, failed = 0;
   const BATCH_SIZE = 5;
 
+  // 用 doi 建立索引，确保写入正确的论文
+  const doiToPaper = new Map(papersCache.map(p => [p.doi, p]));
+
   for (let i = 0; i < total; i += BATCH_SIZE) {
     const batch = papersNeedingSummary.slice(i, i + BATCH_SIZE);
     const batchNum = Math.floor(i / BATCH_SIZE) + 1;
@@ -227,13 +230,15 @@ async function generateAISummaries(forceRegenerate = false) {
       const { reply, results } = await aiSummarizeBatch(batch);
 
       results.forEach(r => {
-        const paper = papersNeedingSummary[i + r.idx];
-        if (r.parsed) {
-          paper.aiSummary = r.parsed;
+        const batchPaper = batch[r.idx];
+        // 通过 doi 找到缓存中的论文（而不是用索引）
+        const cachedPaper = doiToPaper.get(batchPaper.doi);
+        if (cachedPaper && r.parsed) {
+          cachedPaper.aiSummary = r.parsed;
           success++;
         } else {
           failed++;
-          console.warn(`[AI] 论文 ${r.doi} 解析失败（matched=${r.matched}）`);
+          console.warn(`[AI] 论文 ${batchPaper.doi} 写入失败`);
         }
       });
 
@@ -294,31 +299,32 @@ async function fetchFromBioRxiv(url) {
 }
 
 async function fetchLatestPapers() {
-  console.log('[fetch] 开始获取论文...');
+  console.log('[fetch] 开始获取最新 100 篇论文...');
 
-  const strategies = [
-    { label: '日期范围30天', fn: () => fetchFromBioRxiv(`${BIORXIV_API}/details/biorxiv/${getDateRange(30)}/0/json`) },
-    { label: '日期范围7天', fn: () => fetchFromBioRxiv(`${BIORXIV_API}/details/biorxiv/${getDateRange(7)}/0/json`) },
-    { label: '数字端点100', fn: () => fetchFromBioRxiv(`${BIORXIV_API}/details/biorxiv/100`) },
-  ];
+  let collection = [];
 
-  let collection = null;
-  for (const s of strategies) {
-    try {
-      console.log(`[fetch] 尝试: ${s.label}`);
-      const data = await s.fn();
-      if (data.length > 0) {
-        collection = data;
-        console.log(`[fetch] 成功！共 ${collection.length} 篇`);
-        break;
-      }
-    } catch (e) {
-      console.log(`[fetch] ${s.label} 失败: ${e.message}`);
-    }
+  try {
+    // 直接获取最新 100 篇
+    const url = `${BIORXIV_API}/details/biorxiv/100`;
+    console.log(`[fetch] 请求: ${url}`);
+    
+    const response = await fetch(url, {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'ShuaShua/1.0' }
+    });
+    
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    collection = data.collection || [];
+    
+    console.log(`[fetch] 成功！获取 ${collection.length} 篇论文`);
+
+  } catch (e) {
+    console.error(`[fetch] 获取失败: ${e.message}`);
+    return false;
   }
 
-  if (!collection) {
-    console.error('[fetch] 所有策略均失败');
+  if (collection.length === 0) {
+    console.error('[fetch] 未获取到任何论文');
     return false;
   }
 
