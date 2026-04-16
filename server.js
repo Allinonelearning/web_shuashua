@@ -46,12 +46,19 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-const CACHE_FILE = path.join(__dirname, 'papers_cache.json');
+const CACHE_DIR = process.env.CACHE_DIR || path.join(__dirname);
+const CACHE_FILE = path.join(CACHE_DIR, 'papers_cache.json');
+
+// ─── GitHub Gist 持久化配置 ───
+const GIST_TOKEN = process.env.GIST_TOKEN || '';
+const GIST_ID = process.env.GIST_ID || '';
+const GIST_FILENAME = 'papers_cache.json';
 
 // ─── 内存缓存 ───
 let papersCache = [];
 let lastUpdateTime = 0;
 let lastAISummaryTime = 0;
+let gistSaveTimer = null; // 防抖：避免频繁写入 Gist
 
 function loadCacheFromFile() {
   try {
@@ -60,14 +67,47 @@ function loadCacheFromFile() {
       papersCache = cache.papers || [];
       lastUpdateTime = cache.lastUpdate || 0;
       lastAISummaryTime = cache.lastAISummaryTime || 0;
-      console.log(`[cache] 加载 ${papersCache.length} 篇，已有中文总结 ${papersCache.filter(p => p.aiSummary).length} 篇`);
+      console.log(`[cache:file] 加载 ${papersCache.length} 篇，已有中文总结 ${papersCache.filter(p => p.aiSummary).length} 篇`);
+      return true;
     }
   } catch (e) {
-    console.error('[cache] 加载失败:', e.message);
+    console.error('[cache:file] 加载失败:', e.message);
+  }
+  return false;
+}
+
+async function loadCacheFromGist() {
+  if (!GIST_TOKEN || !GIST_ID) {
+    console.log('[cache:gist] 未配置 GIST_TOKEN/GIST_ID，跳过');
+    return false;
+  }
+  try {
+    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+      headers: {
+        'Authorization': `Bearer ${GIST_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'ShuaShua/1.0'
+      }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const gist = await res.json();
+    const file = gist.files && gist.files[GIST_FILENAME];
+    if (!file || !file.content) throw new Error('Gist 中无缓存文件');
+    const cache = JSON.parse(file.content);
+    papersCache = cache.papers || [];
+    lastUpdateTime = cache.lastUpdate || 0;
+    lastAISummaryTime = cache.lastAISummaryTime || 0;
+    console.log(`[cache:gist] ✅ 从 Gist 加载 ${papersCache.length} 篇，已有中文总结 ${papersCache.filter(p => p.aiSummary).length} 篇`);
+    // 同步到本地文件
+    saveCacheToLocal();
+    return true;
+  } catch (e) {
+    console.error(`[cache:gist] 加载失败: ${e.message}`);
+    return false;
   }
 }
 
-function saveCacheToFile() {
+function saveCacheToLocal() {
   try {
     fs.writeFileSync(CACHE_FILE, JSON.stringify({
       papers: papersCache,
@@ -76,7 +116,49 @@ function saveCacheToFile() {
       updateTime: new Date().toISOString()
     }, null, 2));
   } catch (e) {
-    console.error('[cache] 保存失败:', e.message);
+    console.error('[cache:file] 保存失败:', e.message);
+  }
+}
+
+async function saveCacheToGist() {
+  if (!GIST_TOKEN || !GIST_ID) return;
+  try {
+    const payload = JSON.stringify({
+      papers: papersCache,
+      lastUpdate: lastUpdateTime,
+      lastAISummaryTime: lastAISummaryTime,
+      updateTime: new Date().toISOString()
+    });
+    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${GIST_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'ShuaShua/1.0'
+      },
+      body: JSON.stringify({
+        files: {
+          [GIST_FILENAME]: { content: payload }
+        }
+      })
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`[cache:gist] 保存失败: HTTP ${res.status} ${err.substring(0, 100)}`);
+    } else {
+      console.log(`[cache:gist] ✅ 已同步到 Gist（${papersCache.length} 篇）`);
+    }
+  } catch (e) {
+    console.error(`[cache:gist] 保存异常: ${e.message}`);
+  }
+}
+
+// 防抖保存：本地即时写，Gist 延迟 30 秒合并写入
+function saveCacheToFile() {
+  saveCacheToLocal();
+  if (GIST_TOKEN && GIST_ID) {
+    if (gistSaveTimer) clearTimeout(gistSaveTimer);
+    gistSaveTimer = setTimeout(saveCacheToGist, 30000);
   }
 }
 
@@ -486,7 +568,9 @@ app.get('/api/latest', async (req, res) => {
       await fetchLatestPapers();
     }
 
-    res.json({ success: true, data: papersCache.slice(c, c + p), total: papersCache.length, cursor: c + p });
+    // 返回时去掉 summary 字段（前端不用，减少 60%+ 响应体积）
+    const sliced = papersCache.slice(c, c + p).map(({ summary, ...rest }) => rest);
+    res.json({ success: true, data: sliced, total: papersCache.length, cursor: c + p });
   } catch (e) {
     console.error('[api/latest]', e);
     res.status(500).json({ success: false, error: e.message });
@@ -533,6 +617,10 @@ app.get('/api/refresh', async (req, res) => {
 
   // 自动生成缺失的摘要
   const result = await generateAISummaries(false);
+
+  // 刷新后立即同步到 Gist
+  await saveCacheToGist();
+
   res.json({
     success: true,
     count: papersCache.length,
@@ -601,16 +689,24 @@ app.get('/api/download-cache', async (req, res) => {
 // ─── 启动 ───
 app.listen(PORT, async () => {
   console.log(`\n🚀 科学新知后端启动 | 端口 ${PORT}`);
-  loadCacheFromFile();
+
+  // 优先从 Gist 加载（持久化），失败则从本地文件
+  const gistLoaded = await loadCacheFromGist();
+  if (!gistLoaded) {
+    loadCacheFromFile();
+  }
 
   if (papersCache.length === 0) {
     console.log('[startup] 缓存为空，正在获取论文...');
     await fetchLatestPapers();
   }
 
+  // 只有在没有任何 AI 摘要时才自动生成（避免浪费 token）
   if (papersCache.length > 0 && papersCache.filter(p => p.aiSummary).length === 0) {
     console.log('[startup] 暂无中文总结，立即生成...');
     generateAISummaries().catch(e => console.error('[startup] AI 生成失败:', e.message));
+  } else {
+    console.log(`[startup] 已有 ${papersCache.filter(p => p.aiSummary).length}/${papersCache.length} 篇摘要，跳过 AI 生成`);
   }
 
   startScheduler();
