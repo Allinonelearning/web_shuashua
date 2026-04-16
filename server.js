@@ -7,9 +7,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ─── AI 摘要配置 ───
-const AI_API_KEY = process.env.AI_API_KEY || 'sk-vEvVBRVOEfZdtoipoKZnVxEQQOZdPmOYUDFqwx0IWIOnir2x';
-const AI_BASE_URL = 'https://api.chatanywhere.org/v1';
-const AI_MODEL = 'gpt-4o-mini';
+const AI_API_KEY = process.env.AI_API_KEY || '';
+const AI_BASE_URL = process.env.AI_BASE_URL || 'https://api.chatanywhere.org/v1';
+const AI_MODEL = process.env.AI_MODEL || 'gpt-5-nano';
 const AI_TIMEOUT_MS = 150000; // 150秒超时
 
 async function aiPost(endpoint, body, timeoutMs = AI_TIMEOUT_MS) {
@@ -387,88 +387,64 @@ async function generateAISummaries(forceRegenerate = false) {
   // 建立 doi → paper 索引
   const doiMap = new Map(papersCache.map(p => [p.doi, p]));
 
-  let success = 0, failed = 0, retried = 0;
-  const BATCH_SIZE = 3;
-  const MAX_RETRIES = 1;
+  let success = 0, failed = 0;
 
-  for (let i = 0; i < needsSummary.length; i += BATCH_SIZE) {
-    const batch = needsSummary.slice(i, i + BATCH_SIZE);
-    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-    const totalBatches = Math.ceil(needsSummary.length / BATCH_SIZE);
-
-    console.log(`\n[AI] 批次 ${batchNum}/${totalBatches}，处理 ${batch.length} 篇：`);
-    batch.forEach((p, bi) => console.log(`  [${bi}] ${p.title.substring(0, 50)}...`));
-
-    let batchSuccess = 0;
+  for (let i = 0; i < needsSummary.length; i++) {
+    const paper = needsSummary[i];
+    console.log(`\n[AI] ${i + 1}/${needsSummary.length}：${paper.title.substring(0, 50)}...`);
 
     try {
-      const { rawText, parsedArr } = await aiSummarizeBatch(batch);
-
-      if (parsedArr && parsedArr.length > 0) {
-        // 批量成功：写入 headline
-        parsedArr.forEach(entry => {
-          const paper = batch[entry.i];
-          if (!paper || !entry.headline) return;
-          const cached = doiMap.get(paper.doi);
-          if (cached) {
-            cached.aiSummary = entry.headline + '||';
-            batchSuccess++;
-            console.log(`  ✅ [${entry.i}] ${entry.headline.substring(0, 35)}...`);
-          }
-        });
-        success += batchSuccess;
-
-        // 同步补充完整摘要（points + meaning），不再依赖异步
-        if (batchSuccess > 0) {
-          const succeededPapers = parsedArr.filter(e => e.headline).map(e => batch[e.i]);
-          for (const paper of succeededPapers) {
-            const cached = doiMap.get(paper.doi);
-            if (!cached || !cached.aiSummary) continue;
-            const parts = cached.aiSummary.split('||');
-            if (parts.length >= 3 && parts[1].trim() && parts[2].trim()) continue;
-            try {
-              const full = await aiSummarizeOne(paper);
-              if (full && full.includes('||') && full.split('||').length >= 3) {
-                cached.aiSummary = full;
-                console.log(`  📝 [补充完整] ${paper.doi}`);
-              }
-            } catch (e) {
-              console.warn(`  ⚠️  补充失败: ${e.message}`);
-            }
-            await new Promise(r => setTimeout(r, 600));
-          }
-        }
-
-        if (batchSuccess < batch.length) {
-          const failedBatch = batch.filter((p, pi) => !parsedArr.find(e => e.i === pi && e.headline));
-          const extra = await fillMissingSummaries(failedBatch, doiMap);
-          success += extra.success;
-          failed += extra.failed;
-        }
+      const result = await aiSummarizeOne(paper);
+      if (result && result.includes('||') && result.split('||').filter(s => s.trim()).length >= 2) {
+        const cached = doiMap.get(paper.doi);
+        if (cached) cached.aiSummary = result;
+        success++;
+        console.log(`  ✅ ${result.split('||')[0].substring(0, 35)}...`);
+      } else if (result) {
+        // 只有导语没有完整三段，也先存着
+        const cached = doiMap.get(paper.doi);
+        if (cached) cached.aiSummary = result;
+        success++;
+        console.log(`  ⚠️ 部分成功: ${result.substring(0, 35)}...`);
       } else {
-        console.warn(`[AI] 批次 ${batchNum} 批量失败，降级为逐篇处理`);
-        const extra = await fillMissingSummaries(batch, doiMap, MAX_RETRIES);
-        success += extra.success;
-        failed += extra.failed;
-        retried += extra.retried;
+        failed++;
+        console.warn(`  ❌ 返回为空`);
       }
     } catch (e) {
-      console.error(`[AI] 批次 ${batchNum} 异常: ${e.message}`);
-      const extra = await fillMissingSummaries(batch, doiMap, MAX_RETRIES);
-      success += extra.success;
-      failed += extra.failed;
-      retried += extra.retried;
+      console.error(`  ❌ 失败: ${e.message}`);
+      // 超时类错误，等3秒重试一次
+      if (e.message && (e.message.includes('524') || e.message.includes('超时') || e.message.includes('aborted'))) {
+        console.log(`  ⏳ 等待3秒后重试...`);
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const result = await aiSummarizeOne(paper);
+          if (result && result.includes('||')) {
+            const cached = doiMap.get(paper.doi);
+            if (cached) cached.aiSummary = result;
+            success++;
+            console.log(`  ✅ 重试成功: ${result.split('||')[0].substring(0, 35)}...`);
+          } else {
+            failed++;
+          }
+        } catch (e2) {
+          console.error(`  ❌ 重试也失败: ${e2.message}`);
+          failed++;
+        }
+      } else {
+        failed++;
+      }
     }
 
-    saveCacheToFile();
-    console.log(`[AI] 批次 ${batchNum} 完成。累计成功 ${success}，失败 ${failed}`);
-    if (i + BATCH_SIZE < needsSummary.length) await new Promise(r => setTimeout(r, 1200));
+    // 每篇之间间隔1秒，避免速率限制
+    if (i < needsSummary.length - 1) await new Promise(r => setTimeout(r, 1000));
+    // 每10篇存一次
+    if ((i + 1) % 10 === 0) saveCacheToFile();
   }
 
   lastAISummaryTime = Date.now();
   saveCacheToFile();
   console.log(`\n[AI] 全部完成！成功 ${success}，失败 ${failed}`);
-  return { success, failed, retried, total: papersCache.length };
+  return { success, failed, total: papersCache.length };
 }
 
 // ─── 补充完整摘要（后台异步执行）───
