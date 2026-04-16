@@ -80,36 +80,8 @@ function saveCacheToFile() {
   }
 }
 
-// ─── bioRxiv 学科分类映射（英文 → 中文）───
-const CATEGORY_MAP = {
-  'Animal Behavior and Cognition': '动物行为与认知',
-  'Biochemistry': '生物化学',
-  'Bioengineering': '生物工程',
-  'Bioinformatics': '生物信息学',
-  'Biophysics': '生物物理学',
-  'Cancer Biology': '癌症生物学',
-  'Cell Biology': '细胞生物学',
-  'Clinical Trials': '临床试验',
-  'Developmental Biology': '发育生物学',
-  'Ecology': '生态学',
-  'Epidemiology': '流行病学',
-  'Evolutionary Biology': '进化生物学',
-  'Genetics': '遗传学',
-  'Genomics': '基因组学',
-  'Immunology': '免疫学',
-  'Microbiology': '微生物学',
-  'Molecular Biology': '分子生物学',
-  'Neuroscience': '神经科学',
-  'Pharmacology and Toxicology': '药理学与毒理学',
-  'Physiology': '生理学',
-  'Plant Biology': '植物生物学',
-  'Scientific Communication': '科学传播',
-  'Synthetic Biology': '合成生物学',
-  'Virology': '病毒学'
-};
-
 function getCategoryCN(category) {
-  return CATEGORY_MAP[category] || category || '生物';
+  return category || 'General Biology';
 }
 function formatDate(dateString) {
   if (!dateString) return '';
@@ -153,7 +125,8 @@ async function fetchLatestPapers() {
     try {
       console.log(`[fetch] 第 ${cursor / perPage + 1} 页 (cursor=${cursor})...`);
       const data = await fetchFromServer(startStr, endStr, cursor, perPage);
-      const collection = (data.collection || []).map(item => ({ ...item, _source: 'bioRxiv · ' + getCategoryCN(item.category) }));
+            const collection = (data.collection || []).map(item => ({ ...item, _source: getCategoryCN(item.category) }));
+
       if (collection.length === 0) break;
       allItems = allItems.concat(collection);
       console.log(`[fetch] 本页 ${collection.length} 篇，累计 ${allItems.length} 篇`);
@@ -196,7 +169,7 @@ async function fetchLatestPapers() {
       link: `https://doi.org/${item.doi}`,
       doi: item.doi,
       license: item.license || '',
-      source: item._source || 'bioRxiv',
+      source: item._source || getCategoryCN(item.category) || '科学前沿',
       aiSummary: existing ? existing.aiSummary : ''
     };
   });
@@ -204,6 +177,13 @@ async function fetchLatestPapers() {
   // 合并：新论文 + 旧论文（不在新批次中的也保留，aiSummary 不丢）
   const oldPapers = papersCache.filter(p => !newIds.has(p.id));
   papersCache = [...allPapers, ...oldPapers];
+
+  // 统一 source：旧数据有 "bioRxiv · 中文分类"，全部统一为纯英文分类名
+  papersCache.forEach(p => {
+    if (p.source && p.source.startsWith('bioRxiv · ')) {
+      p.source = p.source.replace('bioRxiv · ', '');
+    }
+  });
 
   lastUpdateTime = Date.now();
   saveCacheToFile();
