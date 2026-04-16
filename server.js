@@ -46,7 +46,6 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-const BIORXIV_API = 'https://api.biorxiv.org';
 const CACHE_FILE = path.join(__dirname, 'papers_cache.json');
 
 // ─── 内存缓存 ───
@@ -81,14 +80,44 @@ function saveCacheToFile() {
   }
 }
 
-// ─── bioRxiv 获取（正确用法：需要日期范围 + 分页）───
+// ─── bioRxiv 学科分类映射（英文 → 中文）───
+const CATEGORY_MAP = {
+  'Animal Behavior and Cognition': '动物行为与认知',
+  'Biochemistry': '生物化学',
+  'Bioengineering': '生物工程',
+  'Bioinformatics': '生物信息学',
+  'Biophysics': '生物物理学',
+  'Cancer Biology': '癌症生物学',
+  'Cell Biology': '细胞生物学',
+  'Clinical Trials': '临床试验',
+  'Developmental Biology': '发育生物学',
+  'Ecology': '生态学',
+  'Epidemiology': '流行病学',
+  'Evolutionary Biology': '进化生物学',
+  'Genetics': '遗传学',
+  'Genomics': '基因组学',
+  'Immunology': '免疫学',
+  'Microbiology': '微生物学',
+  'Molecular Biology': '分子生物学',
+  'Neuroscience': '神经科学',
+  'Pharmacology and Toxicology': '药理学与毒理学',
+  'Physiology': '生理学',
+  'Plant Biology': '植物生物学',
+  'Scientific Communication': '科学传播',
+  'Synthetic Biology': '合成生物学',
+  'Virology': '病毒学'
+};
+
+function getCategoryCN(category) {
+  return CATEGORY_MAP[category] || category || '生物';
+}
 function formatDate(dateString) {
   if (!dateString) return '';
   return new Date(dateString).toISOString().split('T')[0];
 }
 
-async function fetchFromBioRxivPage(startDate, endDate, cursor = 0, perPage = 100) {
-  const url = `${BIORXIV_API}/details/biorxiv/${startDate}/${endDate}/${cursor}/${perPage}`;
+async function fetchFromServer(startDate, endDate, cursor, perPage) {
+  const url = `https://api.biorxiv.org/details/biorxiv/${startDate}/${endDate}/${cursor}/${perPage}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
   try {
@@ -110,6 +139,17 @@ async function fetchLatestPapers() {
 
   const endDate = new Date();
   const startDate = new Date();
+  startDate.setDate(startDate.getDate() - 60);
+
+  const startStr = startDate.toISOString().split('T')[0];
+  const endStr = endDate.toISOString().split('T')[0];
+  console.log(`[fetch] 日期范围: ${startStr} ~ ${endStr}`);
+
+  async function fetchLatestPapers() {
+  console.log('[fetch] 开始获取最新论文...');
+
+  const endDate = new Date();
+  const startDate = new Date();
   startDate.setDate(startDate.getDate() - 60); // 往前推60天，确保覆盖
 
   const startStr = startDate.toISOString().split('T')[0];
@@ -119,19 +159,19 @@ async function fetchLatestPapers() {
   let allItems = [];
   let cursor = 0;
   const perPage = 100;
+  const maxItems = 100; // 每天最多 100 篇
 
-  // 分页获取，直到拿到至少 150 篇
-  while (allItems.length < 150) {
+  while (allItems.length < maxItems && cursor < 500) {
     try {
-      console.log(`[fetch] 获取第 ${cursor / perPage + 1} 页 (cursor=${cursor})...`);
-      const data = await fetchFromBioRxivPage(startStr, endStr, cursor, perPage);
-      const collection = data.collection || [];
+      console.log(`[fetch] 第 ${cursor / perPage + 1} 页 (cursor=${cursor})...`);
+      const data = await fetchFromServer(startStr, endStr, cursor, perPage);
+      const collection = (data.collection || []).map(item => ({ ...item, _source: 'bioRxiv · ' + getCategoryCN(item.category) }));
       if (collection.length === 0) break;
       allItems = allItems.concat(collection);
       console.log(`[fetch] 本页 ${collection.length} 篇，累计 ${allItems.length} 篇`);
-      if (collection.length < perPage) break; // 最后一页
+      if (collection.length < perPage) break;
       cursor += perPage;
-      await new Promise(r => setTimeout(r, 500)); // 礼貌延迟
+      await new Promise(r => setTimeout(r, 500));
     } catch (e) {
       console.error(`[fetch] 第 ${cursor / perPage + 1} 页失败: ${e.message}`);
       break;
@@ -143,14 +183,23 @@ async function fetchLatestPapers() {
     return false;
   }
 
+  // 截取最多 100 篇
+  allItems = allItems.slice(0, maxItems);
+  console.log(`[fetch] 共获取 ${allItems.length} 篇论文，开始处理...`);
+    return false;
+  }
+
   console.log(`[fetch] 共获取 ${allItems.length} 篇论文，开始处理...`);
 
-  // 用 id 建立索引，保留已有 aiSummary
+  // 用 id 建立索引，保留已有 aiSummary（旧论文的摘要不丢失）
   const existingMap = new Map(papersCache.map(p => [p.id, p]));
+  const newIds = new Set();
 
-  papersCache = allItems.map(item => {
+  // 构建新论文列表，保留旧论文摘要
+  const allPapers = allItems.map(item => {
     const id = item.doi || item.url;
     const existing = existingMap.get(id);
+    newIds.add(id);
     const title = item.title || '无标题';
     const abstractText = item.abstract || '(原文摘要暂不可用)';
     const authorsText = (item.authors || '').split(';').slice(0, 5).join(', ');
@@ -165,14 +214,19 @@ async function fetchLatestPapers() {
       link: `https://doi.org/${item.doi}`,
       doi: item.doi,
       license: item.license || '',
-      // 保留已有总结，新论文为空字符串
+      source: item._source || 'bioRxiv',
+      // 保留旧论文摘要；新论文为空
       aiSummary: existing ? existing.aiSummary : ''
     };
   });
 
+  // 合并：新论文 + 旧论文（不在新批次中的也保留，aiSummary 不丢）
+  const oldPapers = papersCache.filter(p => !newIds.has(p.id));
+  papersCache = [...allPapers, ...oldPapers];
+
   lastUpdateTime = Date.now();
   saveCacheToFile();
-  console.log(`[fetch] 处理完成，共 ${papersCache.length} 篇，已有总结 ${papersCache.filter(p => p.aiSummary).length} 篇`);
+  console.log(`[fetch] 处理完成，共 ${papersCache.length} 篇（新增 ${allItems.length}，保留旧论文 ${oldPapers.length}），已有总结 ${papersCache.filter(p => p.aiSummary).length} 篇`);
   return true;
 }
 
@@ -219,58 +273,68 @@ async function aiSummarizeOne(paper) {
   return reply.trim();
 }
 
-// ─── AI 批量摘要（每次 3 篇，更稳定）───
+// ─── AI 批量摘要（使用简单分隔符，避免 JSON 解析）───
 async function aiSummarizeBatch(batch) {
   const paperBlocks = batch.map((p, idx) => {
-    const s = p.summary && p.summary !== '(原文摘要暂不可用)' ? p.summary : `这是一篇关于${p.category || '科学'}领域的研究，标题为"${p.title}"。`;
-    return `[论文${idx + 1}]\n标题：${p.title}\n作者：${p.authors}\n摘要：${s}`;
+    const s = p.summary && p.summary !== '(原文摘要暂不可用)' 
+      ? p.summary.substring(0, 600) 
+      : `${p.title}`;
+    return `【${idx}】${p.title}\n摘要：${s}`;
   }).join('\n\n');
 
-  const prompt = `你是一位科学记者。请为以下每篇研究撰写中文新闻报道，严格按JSON格式输出（只输出JSON，不要任何其他内容）：
-
-每篇格式：{"i":N,"l":"导语30-50字","p":"要点80-120字","m":"意义30字以内"}
+  // 简单 prompt，只要求一行一个导语
+  const prompt = `为每篇研究写一句中文新闻导语（25-40字，像新闻标题那样直接说发现了什么，禁止"研究表明""本研究发现"）。
 
 ${paperBlocks}
 
-输出JSON数组（示例）：
-[{"i":0,"l":"中美团队在海洋中发现新型可降解塑料细菌","p":"该细菌能在常温下分解常见塑料，效率是现有方法的3倍，成本降低60%","m":"有望帮助解决塑料污染难题"}]
+输出要求：必须为每篇输出一行，格式必须是 "序号|导语"，不能遗漏任何一篇，不能添加解释。
+输出示例（5篇必须输出5行）：
+0|新研究发现XXX
+1|科学家首次发现YYY
+2|研究揭示ZZZ的作用机制
+3|实验证实AAA可降低BBB风险
+4|科学家开发出新型CCC方法
 
-只输出JSON数组：`;
+只输出这${batch.length}行：`;
 
   const res = await aiPost('/chat/completions', {
     model: AI_MODEL,
     messages: [{ role: 'user', content: prompt }],
-    temperature: 0.3,
-    max_tokens: 2500,
+    temperature: 0.5,
+    max_tokens: 600,
   });
 
   const rawText = await res.text();
   if (!res.ok) throw new Error(`AI API 错误 ${res.status}: ${rawText.substring(0, 200)}`);
 
-  // 尝试解析 JSON（先提取数组部分）
-  let parsedArr = null;
-  try {
-    const jsonMatch = rawText.match(/\[[\s\S]+?\]/);
-    if (jsonMatch) parsedArr = JSON.parse(jsonMatch[0]);
-  } catch (e) {
-    // JSON 解析失败，备用：逐行解析
-    console.warn('[batch] JSON 解析失败，尝试逐行解析');
-  }
+  const json = JSON.parse(rawText);
+  const reply = (json.choices && json.choices[0] && json.choices[0].message.content) || '';
+  
+  // 解析每行结果
+  const results = [];
+  const lines = reply.trim().split('\n').filter(l => l.includes('|'));
+  lines.forEach(line => {
+    const match = line.match(/^(\d+)\|(.+)$/);
+    if (match) {
+      results.push({ i: parseInt(match[1]), headline: match[2].trim() });
+    }
+  });
 
-  return { rawText, parsedArr };
+  return { rawText: reply, parsedArr: results };
 }
 
 // ─── 主生成函数（完整版：批量 + 单篇兜底 + 多次尝试）───
 async function generateAISummaries(forceRegenerate = false) {
-  // 取最新论文（去重后），最多取 150 篇
+  // 取最新论文（去重后），最多取 200 篇
   const sorted = [...papersCache].sort((a, b) => new Date(b.date) - new Date(a.date));
-  const candidates = sorted.slice(0, 150);
+  const candidates = sorted.slice(0, 200);
 
-  // 分离：已有总结 / 需要生成
-  const needsSummary = forceRegenerate ? candidates : candidates.filter(p => !p.aiSummary);
-  const alreadyDone = candidates.filter(p => p.aiSummary);
+  // 分离：已有完整总结 / 需要生成
+  const hasFullSummary = p => p.aiSummary && p.aiSummary.split('||').filter(s => s.trim()).length >= 2;
+  const needsSummary = forceRegenerate ? candidates : candidates.filter(p => !hasFullSummary(p));
+  const alreadyDone = candidates.filter(p => hasFullSummary(p));
 
-  console.log(`[AI] 共 ${candidates.length} 篇候选，已有总结 ${alreadyDone.length} 篇，需生成 ${needsSummary.length} 篇`);
+  console.log(`[AI] 共 ${candidates.length} 篇候选，已有完整总结 ${alreadyDone.length} 篇，需生成 ${needsSummary.length} 篇`);
 
   if (needsSummary.length === 0) {
     console.log('[AI] 所有论文已有中文总结');
@@ -281,8 +345,8 @@ async function generateAISummaries(forceRegenerate = false) {
   const doiMap = new Map(papersCache.map(p => [p.doi, p]));
 
   let success = 0, failed = 0, retried = 0;
-  const BATCH_SIZE = 3;
-  const MAX_RETRIES = 1; // 最多重试1次
+  const BATCH_SIZE = 5;
+  const MAX_RETRIES = 1;
 
   for (let i = 0; i < needsSummary.length; i += BATCH_SIZE) {
     const batch = needsSummary.slice(i, i + BATCH_SIZE);
@@ -290,56 +354,63 @@ async function generateAISummaries(forceRegenerate = false) {
     const totalBatches = Math.ceil(needsSummary.length / BATCH_SIZE);
 
     console.log(`\n[AI] 批次 ${batchNum}/${totalBatches}，处理 ${batch.length} 篇：`);
-
-    // 打印每篇标题（截断）
     batch.forEach((p, bi) => console.log(`  [${bi}] ${p.title.substring(0, 50)}...`));
 
     let batchSuccess = 0;
 
     try {
-      // 先尝试批量
       const { rawText, parsedArr } = await aiSummarizeBatch(batch);
 
-      if (parsedArr && Array.isArray(parsedArr)) {
-        // 批量成功，逐篇写入
+      if (parsedArr && parsedArr.length > 0) {
+        // 批量成功：写入 headline
         parsedArr.forEach(entry => {
           const paper = batch[entry.i];
-          if (!paper) return;
+          if (!paper || !entry.headline) return;
           const cached = doiMap.get(paper.doi);
-          if (entry.l && entry.p && entry.m) {
-            const summary = `${entry.l}||${entry.p}||${entry.m}`;
-            if (cached) {
-              cached.aiSummary = summary;
-              batchSuccess++;
-              console.log(`  ✅ [${entry.i}] ${entry.l.substring(0, 30)}...`);
-            }
-          } else {
-            console.log(`  ⚠️  [${entry.i}] 格式不完整:`, JSON.stringify(entry));
+          if (cached) {
+            cached.aiSummary = entry.headline + '||';
+            batchSuccess++;
+            console.log(`  ✅ [${entry.i}] ${entry.headline.substring(0, 35)}...`);
           }
         });
         success += batchSuccess;
+
+        // 同步补充完整摘要（points + meaning），不再依赖异步
+        if (batchSuccess > 0) {
+          const succeededPapers = parsedArr.filter(e => e.headline).map(e => batch[e.i]);
+          for (const paper of succeededPapers) {
+            const cached = doiMap.get(paper.doi);
+            if (!cached || !cached.aiSummary) continue;
+            const parts = cached.aiSummary.split('||');
+            if (parts.length >= 3 && parts[1].trim() && parts[2].trim()) continue;
+            try {
+              const full = await aiSummarizeOne(paper);
+              if (full && full.includes('||') && full.split('||').length >= 3) {
+                cached.aiSummary = full;
+                console.log(`  📝 [补充完整] ${paper.doi}`);
+              }
+            } catch (e) {
+              console.warn(`  ⚠️  补充失败: ${e.message}`);
+            }
+            await new Promise(r => setTimeout(r, 600));
+          }
+        }
+
         if (batchSuccess < batch.length) {
-          // 部分失败，单篇兜底
-          const failedBatch = batch.filter((p, pi) => {
-            const found = parsedArr.find(e => e.i === pi);
-            return !found || !found.l;
-          });
+          const failedBatch = batch.filter((p, pi) => !parsedArr.find(e => e.i === pi && e.headline));
           const extra = await fillMissingSummaries(failedBatch, doiMap);
           success += extra.success;
           failed += extra.failed;
         }
       } else {
-        // 批量完全失败，降级到逐篇处理
         console.warn(`[AI] 批次 ${batchNum} 批量失败，降级为逐篇处理`);
         const extra = await fillMissingSummaries(batch, doiMap, MAX_RETRIES);
         success += extra.success;
         failed += extra.failed;
         retried += extra.retried;
       }
-
     } catch (e) {
       console.error(`[AI] 批次 ${batchNum} 异常: ${e.message}`);
-      // 降级为逐篇
       const extra = await fillMissingSummaries(batch, doiMap, MAX_RETRIES);
       success += extra.success;
       failed += extra.failed;
@@ -348,17 +419,38 @@ async function generateAISummaries(forceRegenerate = false) {
 
     saveCacheToFile();
     console.log(`[AI] 批次 ${batchNum} 完成。累计成功 ${success}，失败 ${failed}`);
-
-    // 批次间延迟，避免触发限速
-    if (i + BATCH_SIZE < needsSummary.length) {
-      await new Promise(r => setTimeout(r, 1500));
-    }
+    if (i + BATCH_SIZE < needsSummary.length) await new Promise(r => setTimeout(r, 1200));
   }
 
   lastAISummaryTime = Date.now();
   saveCacheToFile();
-  console.log(`\n[AI] 全部完成！成功 ${success}，失败 ${failed}，重试 ${retried} 次`);
+  console.log(`\n[AI] 全部完成！成功 ${success}，失败 ${failed}`);
   return { success, failed, retried, total: papersCache.length };
+}
+
+// ─── 补充完整摘要（后台异步执行）───
+async function enrichSummaries(papers, doiMap) {
+  for (const paper of papers) {
+    if (!paper || !paper.doi) continue;
+    const cached = doiMap.get(paper.doi);
+    if (!cached) continue;
+    
+    // 已有完整摘要则跳过
+    if (cached.aiSummary && cached.aiSummary.split('||').length >= 3) continue;
+    
+    try {
+      const full = await aiSummarizeOne(paper);
+      if (full.includes('||')) {
+        cached.aiSummary = full;
+        console.log(`[enrich] ${paper.doi}: 已补充完整摘要`);
+      }
+    } catch (e) {
+      console.warn(`[enrich] ${paper.doi}: ${e.message}`);
+    }
+    
+    await new Promise(r => setTimeout(r, 800));
+  }
+  saveCacheToFile();
 }
 
 // ─── 单篇兜底处理（可多重试）───
@@ -395,8 +487,13 @@ async function fillMissingSummaries(papers, doiMap, retries = 1) {
     }
 
     if (attempt > retries && !success) {
+      // AI 生成失败，写入原始摘要作为兜底
+      const originalSummary = (paper.summary && paper.summary !== '(原文摘要暂不可用)')
+        ? paper.summary.substring(0, 500)
+        : paper.title;
+      if (cached) cached.aiSummary = originalSummary;
       failed++;
-      console.error(`  ✗ 论文 ${paper.doi} 最终失败`);
+      console.log(`  ↩ 论文 ${paper.doi} 写入原始摘要（${originalSummary.length}字）`);
     }
   }
 
@@ -548,39 +645,41 @@ app.listen(PORT, async () => {
 });
 
 // ─── 每日定时任务（早 8 点 + 晚 8 点）───
-let lastScheduledRun = '';
+let lastScheduledRunHours = new Set(); // 记录今天已执行的整点小时
 
-async function scheduledUpdate() {
-  const today = new Date().toISOString().split('T')[0];
-  if (lastScheduledRun === today) {
-    console.log(`[schedule] 今日(${today})已执行，跳过`);
-    return;
-  }
-  console.log(`[schedule] ⏰ 定时更新开始 (${new Date().toISOString()})`);
-  try {
-    const fetched = await fetchLatestPapers();
-    if (fetched) {
-      const result = await generateAISummaries(false);
-      console.log(`[schedule] ✅ 完成：成功 ${result.success}，失败 ${result.failed}`);
+function nextRunOfHour(hour) {
+  const now = new Date();
+  const t = new Date(now);
+  t.setHours(hour, 0, 0, 0);
+  if (t <= now) t.setDate(t.getDate() + 1);
+  return t.getTime() - now.getTime();
+}
+
+function scheduleHour(hour) {
+  const ms = nextRunOfHour(hour);
+  console.log(`[schedule] ${hour}:00 定时任务，距 ${Math.round(ms / 60000)} 分钟`);
+  setTimeout(async () => {
+    const today = new Date().toISOString().split('T')[0];
+    const key = `${today}-${hour}`;
+    if (!lastScheduledRunHours.has(key)) {
+      lastScheduledRunHours.add(key);
+      console.log(`[schedule] ⏰ ${hour}:00 定时更新开始`);
+      try {
+        const fetched = await fetchLatestPapers();
+        if (fetched) {
+          const result = await generateAISummaries(false);
+          console.log(`[schedule] ✅ 完成：成功 ${result.success}，失败 ${result.failed}`);
+        }
+      } catch (e) {
+        console.error('[schedule] ❌ 异常:', e.message);
+      }
     }
-  } catch (e) {
-    console.error('[schedule] ❌ 异常:', e.message);
-  }
-  lastScheduledRun = today;
+    // 重新计算下一天同一时间
+    scheduleHour(hour);
+  }, ms);
 }
 
 function startScheduler() {
-  const now = new Date();
-  const targets = [8, 20].map(h => {
-    const t = new Date(now);
-    t.setHours(h, 0, 0, 0);
-    if (t <= now) t.setDate(t.getDate() + 1);
-    return t.getTime();
-  });
-  const ms = Math.min(...targets) - now.getTime();
-  console.log(`[schedule] 定时器启动，距下次执行 ${Math.round(ms / 60000)} 分钟`);
-  setTimeout(() => {
-    scheduledUpdate();
-    setInterval(scheduledUpdate, 24 * 60 * 60 * 1000);
-  }, ms);
+  scheduleHour(8);
+  scheduleHour(20);
 }
