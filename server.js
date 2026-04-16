@@ -543,12 +543,23 @@ app.get('/api/debug-summary', async (req, res) => {
   }
 });
 
-// 手动刷新论文
+// 手动刷新论文（抓取 + 生成摘要）
 app.get('/api/refresh', async (req, res) => {
   const secret = process.env.REFRESH_SECRET || 'shuashua_refresh_secret';
   if (req.query.secret !== secret) return res.status(403).json({ error: 'Forbidden' });
+
   const ok = await fetchLatestPapers();
-  res.json({ success: ok, count: papersCache.length });
+  if (!ok) return res.json({ success: false, error: '抓取失败' });
+
+  // 自动生成缺失的摘要
+  const result = await generateAISummaries(false);
+  res.json({
+    success: true,
+    count: papersCache.length,
+    summaryDone: result.success,
+    summaryFailed: result.failed,
+    totalWithSummary: papersCache.filter(p => p.aiSummary).length
+  });
 });
 
 // 清空缓存
