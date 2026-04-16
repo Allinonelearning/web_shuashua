@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 const AI_API_KEY = process.env.AI_API_KEY || 'sk-vEvVBRVOEfZdtoipoKZnVxEQQOZdPmOYUDFqwx0IWIOnir2x';
 const AI_BASE_URL = 'https://api.chatanywhere.org/v1';
 const AI_MODEL = 'gpt-4o-mini';
-const AI_TIMEOUT_MS = 90000; // 90秒超时
+const AI_TIMEOUT_MS = 150000; // 150秒超时
 
 async function aiPost(endpoint, body, timeoutMs = AI_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -388,7 +388,7 @@ async function generateAISummaries(forceRegenerate = false) {
   const doiMap = new Map(papersCache.map(p => [p.doi, p]));
 
   let success = 0, failed = 0, retried = 0;
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 3;
   const MAX_RETRIES = 1;
 
   for (let i = 0; i < needsSummary.length; i += BATCH_SIZE) {
