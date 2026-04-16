@@ -140,18 +140,6 @@ async function fetchLatestPapers() {
   const endDate = new Date();
   const startDate = new Date();
   startDate.setDate(startDate.getDate() - 60);
-
-  const startStr = startDate.toISOString().split('T')[0];
-  const endStr = endDate.toISOString().split('T')[0];
-  console.log(`[fetch] 日期范围: ${startStr} ~ ${endStr}`);
-
-  async function fetchLatestPapers() {
-  console.log('[fetch] 开始获取最新论文...');
-
-  const endDate = new Date();
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - 60); // 往前推60天，确保覆盖
-
   const startStr = startDate.toISOString().split('T')[0];
   const endStr = endDate.toISOString().split('T')[0];
   console.log(`[fetch] 日期范围: ${startStr} ~ ${endStr}`);
@@ -159,7 +147,7 @@ async function fetchLatestPapers() {
   let allItems = [];
   let cursor = 0;
   const perPage = 100;
-  const maxItems = 100; // 每天最多 100 篇
+  const maxItems = 100;
 
   while (allItems.length < maxItems && cursor < 500) {
     try {
@@ -183,19 +171,13 @@ async function fetchLatestPapers() {
     return false;
   }
 
-  // 截取最多 100 篇
   allItems = allItems.slice(0, maxItems);
   console.log(`[fetch] 共获取 ${allItems.length} 篇论文，开始处理...`);
-    return false;
-  }
 
-  console.log(`[fetch] 共获取 ${allItems.length} 篇论文，开始处理...`);
-
-  // 用 id 建立索引，保留已有 aiSummary（旧论文的摘要不丢失）
+  // 用 id 建立索引，保留已有 aiSummary（旧论文摘要不丢失）
   const existingMap = new Map(papersCache.map(p => [p.id, p]));
   const newIds = new Set();
 
-  // 构建新论文列表，保留旧论文摘要
   const allPapers = allItems.map(item => {
     const id = item.doi || item.url;
     const existing = existingMap.get(id);
@@ -215,7 +197,6 @@ async function fetchLatestPapers() {
       doi: item.doi,
       license: item.license || '',
       source: item._source || 'bioRxiv',
-      // 保留旧论文摘要；新论文为空
       aiSummary: existing ? existing.aiSummary : ''
     };
   });
