@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 // ─── AI 摘要配置 ───
 const AI_API_KEY = process.env.AI_API_KEY || '';
 const AI_BASE_URL = process.env.AI_BASE_URL || 'https://api.chatanywhere.org/v1';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-5-nano';
+const AI_MODEL = process.env.AI_MODEL || 'gpt-4.1-mini';
 const AI_TIMEOUT_MS = 150000; // 150秒超时
 
 async function aiPost(endpoint, body, timeoutMs = AI_TIMEOUT_MS) {
@@ -313,6 +313,9 @@ async function aiSummarizeOne(paper) {
 
   const json = JSON.parse(rawText);
   const reply = (json.choices && json.choices[0] && json.choices[0].message.content) || '';
+  if (!reply.trim()) {
+    console.warn(`[AI] 空回复，原始响应: ${rawText.substring(0, 300)}`);
+  }
   return reply.trim();
 }
 
