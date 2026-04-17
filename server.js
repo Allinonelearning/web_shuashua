@@ -109,6 +109,7 @@ async function loadCacheFromGist() {
 
 function saveCacheToLocal() {
   try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
     fs.writeFileSync(CACHE_FILE, JSON.stringify({
       papers: papersCache,
       lastUpdate: lastUpdateTime,
