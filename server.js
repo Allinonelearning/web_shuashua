@@ -542,10 +542,10 @@ app.get('/api/latest', async (req, res) => {
     const c = parseInt(cursor) || 0;
     const p = Math.min(parseInt(perPage) || 50, 200);
 
-    // 缓存超过4小时，或数据为空，则重新获取
-    if (papersCache.length === 0 || Date.now() - lastUpdateTime > 4 * 60 * 60 * 1000) {
-      console.log('[api/latest] 缓存为空/过期，重新获取...');
-      await fetchLatestPapers();
+    // 用户访问只返回缓存，不触发刷新（刷新由定时任务负责）
+    // 如果缓存为空，返回空数组而不是阻塞等待
+    if (papersCache.length === 0) {
+      return res.json({ success: true, data: [], total: 0, cursor: 0, message: '缓存为空，请等待定时任务刷新' });
     }
 
     // 返回时去掉 summary 字段（前端不用，减少 60%+ 响应体积）
