@@ -1,0 +1,8 @@
+{
+  "navigationBarTitleText": "科学新知",
+  "enablePullDownRefresh": true,
+  "backgroundTextStyle": "light",
+  "usingComponents": {
+    "tab-bar": "/custom-tab-bar/index"
+  }
+}
