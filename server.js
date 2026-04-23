@@ -186,8 +186,15 @@ async function fetchFromServer(server, interval, cursor, perPage) {
     if (!response.ok) throw new Error(`${server} API HTTP ${response.status}`);
     const data = await response.json();
     // 检查返回的错误状态
-    if (data.messages && data.messages[0] && data.messages[0].status && data.messages[0].status !== 'ok') {
-      throw new Error(`${server} API: ${data.messages[0].status}`);
+    if (data.messages && data.messages[0]) {
+      const msg = data.messages[0];
+      const status = msg.status || '';
+      // 如果 status 不是 ok，说明出错了，抛出完整错误信息
+      if (status !== 'ok') {
+        // 包含 message 字段的话也一起带上
+        const detail = msg.message ? ` (${msg.message})` : '';
+        throw new Error(`${server} API [${status}]${detail} - 原始返回: ${JSON.stringify(data.messages)}`);
+      }
     }
     return data;
   } catch (err) {
