@@ -59,6 +59,7 @@ let papersCache = [];
 let lastUpdateTime = 0;
 let lastAISummaryTime = 0;
 let gistSaveTimer = null; // 防抖：避免频繁写入 Gist
+let lastFetchError = '';  // 上次抓取的错误信息
 
 function loadCacheFromFile() {
   try {
@@ -181,16 +182,24 @@ async function fetchFromServer(startDate, endDate, cursor, perPage) {
       signal: controller.signal
     });
     clearTimeout(timer);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
+    if (!response.ok) throw new Error(`bioRxiv API HTTP ${response.status}`);
+    const data = await response.json();
+    // 检查 bioRxiv 返回的错误状态
+    if (data.messages && data.messages[0] && data.messages[0].status && data.messages[0].status !== 'ok') {
+      throw new Error(`bioRxiv API: ${data.messages[0].status}`);
+    }
+    return data;
   } catch (err) {
     clearTimeout(timer);
+    if (err.name === 'AbortError') throw new Error('bioRxiv API 超时(30s)');
     throw err;
   }
 }
 
 async function fetchLatestPapers() {
   console.log('[fetch] 开始获取最新论文...');
+  lastFetchError = '';
+  let fetchError = '';
 
   const endDate = new Date();
   const startDate = new Date();
@@ -208,7 +217,7 @@ async function fetchLatestPapers() {
     try {
       console.log(`[fetch] 第 ${cursor / perPage + 1} 页 (cursor=${cursor})...`);
       const data = await fetchFromServer(startStr, endStr, cursor, perPage);
-            const collection = (data.collection || []).map(item => ({ ...item, _source: getCategoryCN(item.category) }));
+      const collection = (data.collection || []).map(item => ({ ...item, _source: getCategoryCN(item.category) }));
 
       if (collection.length === 0) break;
       allItems = allItems.concat(collection);
@@ -218,12 +227,15 @@ async function fetchLatestPapers() {
       await new Promise(r => setTimeout(r, 500));
     } catch (e) {
       console.error(`[fetch] 第 ${cursor / perPage + 1} 页失败: ${e.message}`);
+      fetchError = e.message;
       break;
     }
   }
 
   if (allItems.length === 0) {
-    console.error('[fetch] bioRxiv 未返回任何论文');
+    const errMsg = fetchError || 'bioRxiv 未返回任何论文（可能服务器不可用）';
+    console.error('[fetch] ' + errMsg);
+    lastFetchError = errMsg;
     return false;
   }
 
@@ -532,7 +544,8 @@ app.get('/api/health', (req, res) => {
     papers: papersCache.length,
     withSummary: papersCache.filter(p => p.aiSummary).length,
     lastUpdate: lastUpdateTime ? new Date(lastUpdateTime).toISOString() : null,
-    lastAISummary: lastAISummaryTime ? new Date(lastAISummaryTime).toISOString() : null
+    lastAISummary: lastAISummaryTime ? new Date(lastAISummaryTime).toISOString() : null,
+    lastFetchError: lastFetchError || null
   });
 });
 
@@ -593,7 +606,7 @@ app.get('/api/refresh', async (req, res) => {
   if (req.query.secret !== secret) return res.status(403).json({ error: 'Forbidden' });
 
   const ok = await fetchLatestPapers();
-  if (!ok) return res.json({ success: false, error: '抓取失败' });
+  if (!ok) return res.json({ success: false, error: lastFetchError || '抓取失败' });
 
   // 自动生成缺失的摘要
   const result = await generateAISummaries(false);
