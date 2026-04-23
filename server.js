@@ -172,8 +172,9 @@ function formatDate(dateString) {
   return new Date(dateString).toISOString().split('T')[0];
 }
 
-async function fetchFromServer(startDate, endDate, cursor, perPage) {
-  const url = `https://api.biorxiv.org/details/biorxiv/${startDate}/${endDate}/${cursor}/${perPage}`;
+async function fetchFromServer(server, interval, cursor, perPage) {
+  // interval 可以是 "YYYY-MM-DD/YYYY-MM-DD" 日期范围，或 "Nd" 最近N天
+  const url = `https://api.biorxiv.org/details/${server}/${interval}/${cursor}/${perPage}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
   try {
@@ -182,16 +183,16 @@ async function fetchFromServer(startDate, endDate, cursor, perPage) {
       signal: controller.signal
     });
     clearTimeout(timer);
-    if (!response.ok) throw new Error(`bioRxiv API HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`${server} API HTTP ${response.status}`);
     const data = await response.json();
-    // 检查 bioRxiv 返回的错误状态
+    // 检查返回的错误状态
     if (data.messages && data.messages[0] && data.messages[0].status && data.messages[0].status !== 'ok') {
-      throw new Error(`bioRxiv API: ${data.messages[0].status}`);
+      throw new Error(`${server} API: ${data.messages[0].status}`);
     }
     return data;
   } catch (err) {
     clearTimeout(timer);
-    if (err.name === 'AbortError') throw new Error('bioRxiv API 超时(30s)');
+    if (err.name === 'AbortError') throw new Error(`${server} API 超时(30s)`);
     throw err;
   }
 }
@@ -199,50 +200,50 @@ async function fetchFromServer(startDate, endDate, cursor, perPage) {
 async function fetchLatestPapers() {
   console.log('[fetch] 开始获取最新论文...');
   lastFetchError = '';
-  let fetchError = '';
 
-  const endDate = new Date();
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - 3);
-  const startStr = startDate.toISOString().split('T')[0];
-  const endStr = endDate.toISOString().split('T')[0];
-  console.log(`[fetch] 日期范围: ${startStr} ~ ${endStr}`);
-
-  let allItems = [];
-  let cursor = 0;
+  // 使用 Nd 格式获取最近 7 天的论文
+  const interval = '7d';
   const perPage = 100;
   const maxItems = 100;
 
+  let allItems = [];
+  let cursor = 0;
+  let pageCount = 0;
+
   while (allItems.length < maxItems && cursor < 500) {
     try {
-      console.log(`[fetch] 第 ${cursor / perPage + 1} 页 (cursor=${cursor})...`);
-      const data = await fetchFromServer(startStr, endStr, cursor, perPage);
-      const collection = (data.collection || []).map(item => ({ ...item, _source: getCategoryCN(item.category) }));
+      console.log(`[fetch] 第 ${pageCount + 1} 页 (cursor=${cursor})...`);
+      const data = await fetchFromServer('biorxiv', interval, cursor, perPage);
+      const collection = (data.collection || []).map(item => ({
+        ...item,
+        _source: getCategoryCN(item.category)
+      }));
 
-      if (collection.length === 0) break;
+      if (collection.length === 0) {
+        console.log(`[fetch] 第 ${pageCount + 1} 页为空，停止`);
+        break;
+      }
+
       allItems = allItems.concat(collection);
       console.log(`[fetch] 本页 ${collection.length} 篇，累计 ${allItems.length} 篇`);
       if (collection.length < perPage) break;
       cursor += perPage;
+      pageCount++;
       await new Promise(r => setTimeout(r, 500));
     } catch (e) {
-      console.error(`[fetch] 第 ${cursor / perPage + 1} 页失败: ${e.message}`);
-      fetchError = e.message;
+      console.error(`[fetch] 第 ${pageCount + 1} 页失败: ${e.message}`);
+      lastFetchError = e.message;
       break;
     }
   }
 
   if (allItems.length === 0) {
-    const errMsg = fetchError || 'bioRxiv 未返回任何论文（可能服务器不可用）';
+    const errMsg = lastFetchError || 'bioRxiv 未返回任何论文（可能服务器不可用）';
     console.error('[fetch] ' + errMsg);
-    lastFetchError = errMsg;
     return false;
   }
 
-  allItems = allItems.slice(0, maxItems);
-  console.log(`[fetch] 共获取 ${allItems.length} 篇论文，开始处理...`);
-
-  // 用 id 建立索引，保留已有 aiSummary（旧论文摘要不丢失）
+  // 用 id 建立索引，保留已有 aiSummary
   const existingMap = new Map(papersCache.map(p => [p.id, p]));
   const newIds = new Set();
 
@@ -269,11 +270,11 @@ async function fetchLatestPapers() {
     };
   });
 
-  // 合并：新论文 + 旧论文（不在新批次中的也保留，aiSummary 不丢）
+  // 合并：新论文 + 旧论文（aiSummary 不丢）
   const oldPapers = papersCache.filter(p => !newIds.has(p.id));
   papersCache = [...allPapers, ...oldPapers];
 
-  // 统一 source：旧数据有 "bioRxiv · 中文分类"，全部统一为纯英文分类名
+  // 统一 source：去掉旧前缀
   papersCache.forEach(p => {
     if (p.source && p.source.startsWith('bioRxiv · ')) {
       p.source = p.source.replace('bioRxiv · ', '');
@@ -282,7 +283,7 @@ async function fetchLatestPapers() {
 
   lastUpdateTime = Date.now();
   saveCacheToFile();
-  console.log(`[fetch] 处理完成，共 ${papersCache.length} 篇（新增 ${allItems.length}，保留旧论文 ${oldPapers.length}），已有总结 ${papersCache.filter(p => p.aiSummary).length} 篇`);
+  console.log(`[fetch] 处理完成，共 ${papersCache.length} 篇（新增 ${allPapers.length}，保留旧论文 ${oldPapers.length}），已有总结 ${papersCache.filter(p => p.aiSummary).length} 篇`);
   return true;
 }
 
