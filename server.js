@@ -196,7 +196,7 @@ async function fetchFromRSS() {
       const body = match[2];
       
       const getTag = (tag) => {
-        const m = body.match(new RegExp(`<${tag}[^>]*>([\s\S]*?)<\/${tag}>`));
+        const m = body.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`));
         if (!m) return '';
         const raw = m[1].trim();
         if (raw.startsWith('<![CDATA[') && raw.endsWith(']]>')) {
