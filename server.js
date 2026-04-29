@@ -242,7 +242,17 @@ async function fetchLatestPapers() {
     return false;
   }
 
-  if (rssItems.length === 0) {
+  // 过滤掉 title 为空的论文
+  const validItems = rssItems.filter(item => {
+    const title = (item.title || '').trim();
+    if (!title || title === 'null' || title.length < 5) {
+      console.warn(`[fetch] 跳过无效标题: "${title}" DOI=${item.doi}`);
+      return false;
+    }
+    return true;
+  });
+
+  if (validItems.length === 0) {
     console.error('[fetch] RSS 返回空数据');
     lastFetchError = 'RSS 返回空数据';
     return false;
@@ -252,7 +262,7 @@ async function fetchLatestPapers() {
   const existingMap = new Map(papersCache.map(p => [p.id, p]));
   const newIds = new Set();
 
-  const allPapers = rssItems.map(item => {
+  const allPapers = validItems.map(item => {
     const id = item.doi; // doi 作为唯一 id
     const existing = existingMap.get(id);
     newIds.add(id);
@@ -279,7 +289,8 @@ async function fetchLatestPapers() {
   });
 
   // 合并：新论文 + 旧论文（aiSummary 不丢）
-  const oldPapers = papersCache.filter(p => !newIds.has(p.id));
+  // 旧论文也过滤掉无标题的
+  const oldPapers = papersCache.filter(p => !newIds.has(p.id) && p.title && p.title !== '无标题' && p.title.length >= 5);
   papersCache = [...allPapers, ...oldPapers];
 
   lastUpdateTime = Date.now();
@@ -393,7 +404,9 @@ async function generateAISummaries(forceRegenerate = false) {
 
   // 分离：已有完整总结 / 需要生成
   const hasFullSummary = p => p.aiSummary && p.aiSummary.split('||').filter(s => s.trim()).length >= 2;
-  const needsSummary = forceRegenerate ? candidates : candidates.filter(p => !hasFullSummary(p));
+  // 过滤掉无标题的论文（防止 AI 瞎猜生成重复内容）
+  const needsSummary = (forceRegenerate ? candidates : candidates.filter(p => !hasFullSummary(p)))
+    .filter(p => p.title && p.title !== '无标题' && p.title.length >= 5);
   const alreadyDone = candidates.filter(p => hasFullSummary(p));
 
   console.log(`[AI] 共 ${candidates.length} 篇候选，已有完整总结 ${alreadyDone.length} 篇，需生成 ${needsSummary.length} 篇`);
@@ -473,20 +486,25 @@ async function enrichSummaries(papers, doiMap) {
     const cached = doiMap.get(paper.doi);
     if (!cached) continue;
     
-    // 已有完整摘要则跳过
-    if (cached.aiSummary && cached.aiSummary.split('||').length >= 3) continue;
-    
-    try {
-      const full = await aiSummarizeOne(paper);
-      if (full.includes('||')) {
-        cached.aiSummary = full;
-        console.log(`[enrich] ${paper.doi}: 已补充完整摘要`);
+    // 已有完整摘要则跳过；只有 headline 没有完整内容则补全（不要覆盖已有的 headline）
+    const parts = (cached.aiSummary || '').split('||').filter(s => s.trim());
+    if (parts.length >= 3) continue;
+    if (parts.length >= 1 && parts.length < 3) {
+      // 已有 headline，尝试补全 points + meaning
+      try {
+        const full = await aiSummarizeOne(paper);
+        if (full && full.includes('||') && full.split('||').filter(s => s.trim()).length >= 2) {
+          // 保留原有 headline，只追加 points + meaning
+          const existingHeadline = cached.aiSummary.split('||')[0];
+          cached.aiSummary = existingHeadline + '||' + full.split('||').slice(1).join('||');
+          console.log(`[enrich] ${paper.doi}: 补全摘要（保留原导语）`);
+        }
+      } catch (e) {
+        console.warn(`[enrich] ${paper.doi}: ${e.message}`);
       }
-    } catch (e) {
-      console.warn(`[enrich] ${paper.doi}: ${e.message}`);
+      await new Promise(r => setTimeout(r, 800));
+      continue;
     }
-    
-    await new Promise(r => setTimeout(r, 800));
   }
   saveCacheToFile();
 }
